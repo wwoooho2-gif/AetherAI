@@ -81,8 +81,15 @@ case "${1:-all}" in
       4683074336 \
       "1664fccab734674a50763490a8c6931b70e3f2f8ec10031b54806d30e5f956b6"
     ;;
+  */*)
+    # Any Hugging Face GGUF: sh scripts/download-model.sh <owner/repo> <file.gguf>   (no checksum known, so size is not verified)
+    [ -n "${2:-}" ] || { echo "Usage: $0 <owner/repo> <file.gguf>" >&2; exit 2; }
+    mkdir -p "$MODEL_DIR"
+    curl --fail --location --retry 3 --continue-at - --output "$MODEL_DIR/$2" "https://huggingface.co/$1/resolve/main/$2"
+    echo "Saved: $MODEL_DIR/$2"
+    ;;
   *)
-    echo "Usage: $0 [all|fast|coder]" >&2
+    echo "Usage: $0 [all|fast|coder|<owner/repo> <file.gguf>]" >&2
     exit 2
     ;;
 esac

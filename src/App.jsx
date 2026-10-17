@@ -37,7 +37,7 @@ import {
   X,
 } from "lucide-react";
 
-import { IS_STATIC, installStaticBackend, loadBrowserModel, getLoaderState, subscribeLoader, restoreLastModel } from "./staticBackend.js";
+import { IS_STATIC, IS_MOBILE, BROWSER_CONTEXT, installStaticBackend, loadBrowserModel, getLoaderState, subscribeLoader, restoreLastModel } from "./staticBackend.js";
 import ModelLoader from "./ModelLoader.jsx";
 import { createZip } from "./lib/zip.js";
 import { applyPatchBlocks, EDIT_PROMPT, filesFromDrop, parsePatchBlocks, readAttachments } from "./lib/files.js";
@@ -146,7 +146,7 @@ function downloadArtifact(filename, content) {
 }
 
 async function downloadZip(files, filename = "aether-files.zip") {
-  const blob = await createZip(files.map(({ name, content }) => ({ name, content })));
+  const blob = await createZip(files.filter((file) => !file.readOnly).map(({ name, content }) => ({ name, content })));
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -1386,7 +1386,9 @@ function App() {
       return;
     }
     if (action === "remove" && !window.confirm(
-      `Permanently delete ${localModel.name} from ~/Models/Aether?`,
+      IS_STATIC
+        ? `Delete ${localModel.name} from this browser? Your other saved models are not affected.`
+        : `Permanently delete ${localModel.name} from ~/Models/Aether?`,
     )) {
       return;
     }
@@ -1527,7 +1529,7 @@ function App() {
     return {
       role: "system",
       content: [
-        "You are Aether, a direct, practical assistant for programming and general tasks. Answer benign requests fully; if part of a request is off-limits, say so briefly and help with the rest. Ask one short question only if key details are missing. For new code, give complete usable files in fenced blocks labelled with language and filename (for example ```html filename=\"index.html\"), put run steps outside the block, and leave no placeholders.",
+        "You are Aether, a direct, practical assistant for programming and general tasks. Answer benign requests fully; if part of a request is off-limits, say so briefly and help with the rest. Ask one short question only if key details are missing. Write code in any language the user names, including niche, obscure or custom ones; match the language of attached files by default, follow any syntax docs or examples the user gives, and say so briefly if you are unsure of a language rather than guessing silently. For new code, give complete usable files in fenced blocks labelled with language and filename (for example ```html filename=\"index.html\"), put run steps outside the block, and leave no placeholders.",
         `Style: ${responseStyle}`,
         hasFiles ? EDIT_PROMPT : "",
         webOn ? TOOL_PROMPT : "",
@@ -1609,8 +1611,8 @@ function App() {
   // Prompt size is what makes local models slow (prefill), so every turn is packed into a budget.
   function contextPlan(provider) {
     const cloud = provider.provider !== "local";
-    const contextTokens = cloud ? 12_000 : IS_STATIC ? 4096 : 8192;
-    const wanted = longResponseEnabled ? (IS_STATIC ? 2048 : 4096) : 1024;
+    const contextTokens = cloud ? 12_000 : IS_STATIC ? BROWSER_CONTEXT : 8192;
+    const wanted = longResponseEnabled ? (IS_STATIC ? Math.floor(BROWSER_CONTEXT / 2) : 4096) : IS_STATIC && IS_MOBILE ? 768 : 1024;
     const reservedForAnswer = Math.min(wanted, Math.floor(contextTokens / 2));
     return { promptBudget: Math.max(1200, contextTokens - reservedForAnswer - 150) };
   }
@@ -1621,11 +1623,12 @@ function App() {
     let next = files;
     const edits = [];
     const findFile = (name, named) => {
-      if (!named) return next.length === 1 ? next[0] : null;
+      const editable = next.filter((file) => !file.readOnly);
+      if (!named) return editable.length === 1 ? editable[0] : null;
       const clean = name.replace(/^\.?\//, "");
-      const exact = next.filter((file) => file.name === clean);
+      const exact = editable.filter((file) => file.name === clean);
       if (exact.length === 1) return exact[0];
-      const tail = next.filter((file) => file.name.endsWith(`/${clean}`) || file.name.split("/").pop() === clean.split("/").pop());
+      const tail = editable.filter((file) => file.name.endsWith(`/${clean}`) || file.name.split("/").pop() === clean.split("/").pop());
       return tail.length === 1 ? tail[0] : null;
     };
     const update = (file, content) => {
@@ -1931,7 +1934,7 @@ function App() {
       });
     }
     setAttachmentError(
-      rejected.length ? `Skipped: ${nameList(rejected, 4)}. Binary files, files over 2 MB and junk folders (node_modules, .git…) are ignored.` : "",
+      rejected.length ? `Skipped: ${nameList(rejected, 4)}. Images/audio/video/archives, text files over 2 MB and junk folders (node_modules, .git…) are ignored. DLLs, EXEs, PDFs and Office files are read as summaries.` : "",
     );
   }
 

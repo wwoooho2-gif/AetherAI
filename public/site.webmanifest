@@ -1,6 +1,6 @@
 {
   "name": "AetherAI",
-  "short_name": "Aether",
+  "short_name": "AetherAI",
   "description": "A local-first AI chat and model lab that runs GGUF models in your browser.",
   "start_url": ".",
   "scope": ".",

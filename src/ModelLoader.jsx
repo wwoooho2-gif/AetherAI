@@ -10,21 +10,9 @@ import {
   loadBrowserModelFromUrl,
   loadSavedModel,
   subscribeLoader,
+  IS_MOBILE,
 } from "./staticBackend.js";
-
-// Small, widely-compatible starter models (4-bit). The visitor can also use any .gguf of their own.
-const STARTER_MODELS = [
-  {
-    label: "Qwen2.5 0.5B Instruct",
-    detail: "491 MB · fastest",
-    url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-  },
-  {
-    label: "Llama 3.2 1B Instruct",
-    detail: "808 MB · better answers",
-    url: "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-  },
-];
+import { MODEL_CATALOG } from "./lib/models.js";
 
 const formatSize = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
 
@@ -191,9 +179,9 @@ export default function ModelLoader({ compact = false, onLoaded }) {
 
       {!compact && (
         <div className="model-starters">
-          <span className="model-saved-title">No model yet? Try a small one</span>
+          <span className="model-saved-title">No model yet? Tap one to download it</span>
           <div className="model-starter-row">
-            {STARTER_MODELS.map((model) => (
+            {MODEL_CATALOG.filter((model) => !IS_MOBILE || model.phone).map((model) => (
               <button
                 key={model.url}
                 type="button"
@@ -201,7 +189,7 @@ export default function ModelLoader({ compact = false, onLoaded }) {
                 onClick={(event) => { setLink(model.url); submitLink(event, model.url); }}
               >
                 <b>{model.label}</b>
-                <small>{model.detail}</small>
+                <small>{model.group} · {formatSize(model.mb * 1e6)}{model.phone ? " · phone" : ""}</small>
               </button>
             ))}
           </div>
