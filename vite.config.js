@@ -1447,6 +1447,156 @@ function trainingPlugin(hfToken) {
   };
 }
 
+// ---- Web access for the local app --------------------------------------------------------------
+// /__aether/web/search?q=...  -> DuckDuckGo results (no API key)
+// /__aether/web/fetch?url=... -> readable text (+ raw html) of a public page
+// Loopback-only. Every hop (including redirects) is checked against private/internal addresses.
+const WEB_MAX_BYTES = 2_000_000;
+const WEB_UA = "Mozilla/5.0 (compatible; AetherLocal/1.0)";
+
+async function assertPublicUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("That isn't a valid link.");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("Only plain http(s) links can be opened.");
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || isPrivateAddress(host)) {
+    throw new Error("Links to local or private addresses are blocked.");
+  }
+  const addresses = await lookup(host, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error("That address resolves to a private network and was blocked.");
+  }
+  return url;
+}
+
+async function safeFetchText(value, accept = "text/html,text/plain,application/json,application/xml;q=0.9") {
+  let url = await assertPublicUrl(value);
+  for (let hop = 0; hop < 5; hop += 1) {
+    const upstream = await fetch(url, {
+      headers: { "User-Agent": WEB_UA, Accept: accept, "Accept-Language": "en" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get("location")) {
+      url = await assertPublicUrl(new URL(upstream.headers.get("location"), url).href);
+      continue;
+    }
+    if (!upstream.ok) throw new Error(`The site answered HTTP ${upstream.status}.`);
+    const type = upstream.headers.get("content-type") || "";
+    if (!/text\/|json|xml/i.test(type)) throw new Error(`That link is ${type || "a binary file"}, not a readable page.`);
+    const reader = upstream.body.getReader();
+    const chunks = [];
+    let size = 0;
+    for (;;) {
+      const { done, value: chunk } = await reader.read();
+      if (done) break;
+      size += chunk.length;
+      if (size > WEB_MAX_BYTES) {
+        reader.cancel().catch(() => {});
+        break;
+      }
+      chunks.push(chunk);
+    }
+    return { url: url.href, type, body: Buffer.concat(chunks).toString("utf8") };
+  }
+  throw new Error("Too many redirects.");
+}
+
+const decodeEntities = (text) => text
+  .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+  .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)));
+
+function htmlToPlainText(html) {
+  const main = html.match(/<(main|article)[\s>][\s\S]*<\/\1>/i)?.[0] || html;
+  return decodeEntities(
+    main
+      .replace(/<(script|style|noscript|svg|iframe|nav|footer|header|form|aside)[\s\S]*?<\/\1>/gi, " ")
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/<\/(p|div|li|h[1-6]|tr|br|section)>|<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]+>/g, " "),
+  ).replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n\n").trim();
+}
+
+function parseDuckDuckGo(html) {
+  const results = [];
+  // Split into one block per result, then read the link and snippet inside each block.
+  for (const block of html.split(/(?=<a[^>]*class="result__a")/).slice(1)) {
+    const link = block.match(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!link) continue;
+    let href = decodeEntities(link[1]);
+    const wrapped = href.match(/[?&]uddg=([^&]+)/);
+    if (wrapped) href = decodeURIComponent(wrapped[1]);
+    if (href.startsWith("//")) href = `https:${href}`;
+    if (!/^https?:\/\//.test(href)) continue;
+    const snippet = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/)?.[1] || "";
+    const title = decodeEntities(link[2].replace(/<[^>]+>/g, "")).trim();
+    if (!title) continue;
+    results.push({
+      source: new URL(href).hostname.replace(/^www\./, ""),
+      title,
+      url: href,
+      snippet: decodeEntities(snippet.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim(),
+    });
+    if (results.length >= 6) break;
+  }
+  return results;
+}
+
+function webPlugin() {
+  return {
+    name: "aether-web-access",
+    configureServer(server) {
+      server.middlewares.use("/__aether/web", (request, response) => {
+        if (!isLocalSameOrigin(request)) {
+          sendJson(response, 403, { error: "A same-origin loopback request is required." });
+          return;
+        }
+        if (request.method !== "GET") {
+          response.writeHead(405, { Allow: "GET" }).end();
+          return;
+        }
+        const requestUrl = new URL(request.url, "http://127.0.0.1");
+        (async () => {
+          try {
+            if (requestUrl.pathname === "/search") {
+              const query = (requestUrl.searchParams.get("q") || "").trim().slice(0, 300);
+              if (!query) {
+                sendJson(response, 400, { error: "Enter something to search for." });
+                return;
+              }
+              const page = await safeFetchText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+              sendJson(response, 200, { results: parseDuckDuckGo(page.body) });
+              return;
+            }
+            if (requestUrl.pathname === "/fetch") {
+              const page = await safeFetchText(requestUrl.searchParams.get("url") || "");
+              const isHtml = /html/i.test(page.type);
+              const title = decodeEntities(page.body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").trim();
+              sendJson(response, 200, {
+                url: page.url,
+                title: title || new URL(page.url).hostname,
+                text: isHtml ? htmlToPlainText(page.body) : page.body,
+                html: isHtml ? page.body.slice(0, 500_000) : "",
+              });
+              return;
+            }
+            sendJson(response, 404, { error: "Unknown web route." });
+          } catch (error) {
+            sendJson(response, 502, { error: error.message || "The web request failed." });
+          }
+        })();
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, projectRoot, "");
   const hfToken = process.env.HF_TOKEN || env.HF_TOKEN;
@@ -1460,6 +1610,7 @@ export default defineConfig(({ mode }) => {
       modelUploadPlugin(),
       providerPlugin(),
       mediaPlugin(),
+      webPlugin(),
       trainingPlugin(hfToken),
     ],
     server: {

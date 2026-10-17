@@ -904,3 +904,28 @@ input.preferences-field::placeholder { color: #858696; opacity: 1; }
 .welcome-needs-model .group-profile, .welcome-needs-model .welcome-orb, .welcome-needs-model .welcome-copy, .welcome-needs-model .eyebrow { display: none; }
 .welcome-needs-model h1 { margin: 6px 0 0; font-size: clamp(26px, 3.2vw, 34px); letter-spacing: -1.2px; }
 .welcome-needs-model .model-loader { margin-top: 18px; }
+
+/* ---- Web, photos, files, zip, edits ---- */
+.drop-overlay { position: fixed; z-index: 30; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed #8f78d8; margin: 12px; border-radius: 16px; color: #e7dfff; background: #12131ae8; backdrop-filter: blur(4px); pointer-events: none; }
+.drop-overlay strong { font-size: 16px; font-weight: 600; }
+.drop-overlay span { color: #a9a8bb; font-size: 12px; }
+.attachment-edited { border-color: #5a8a6e; background: #1f2b25; }
+.attachment-zip { cursor: pointer; font: inherit; font-size: 10px; }
+.attachment-zip:hover { border-color: #66578c; color: #e6dcff; }
+.attachment-more { align-self: center; color: #999aaa; font-size: 10px; }
+.chat-image, .message-images img { display: block; max-width: min(100%, 420px); max-height: 420px; border-radius: 10px; object-fit: contain; background: #181922; }
+.message-images { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.message-images figure { max-width: min(100%, 420px); margin: 0; }
+.message-images figcaption { margin-top: 5px; color: #999aaa; font-size: 10px; line-height: 1.4; }
+.message-images figcaption a, .message-sources a { color: #b8a8f5; }
+.message-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 10px; font-size: 10px; }
+.message-sources > span { color: #999aaa; text-transform: uppercase; letter-spacing: .08em; font-size: 9px; }
+.message-sources a { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-notes { margin: 8px 0 0; color: #8c8d9c; font-size: 10px; }
+.tool-status { margin: 6px 0 0; color: #a9a8bb; font-size: 11px; }
+.edit-status { padding: 0 8px; color: #8fd0ad; font-size: 9px; font-family: "DM Mono", monospace; }
+.edit-status-warn { color: #ffcf8a; }
+.edit-problems { margin-top: 8px; padding: 8px 10px; border: 1px solid #6b5a33; border-radius: 8px; color: #ffd9a0; background: #2a2418; font-size: 11px; }
+.edit-problems p { margin: 2px 0; }
+.message-body a { color: #b8a8f5; overflow-wrap: anywhere; }
+.message-body p code { padding: 1px 5px; border-radius: 4px; background: #22232d; font: 11px "DM Mono", monospace; }
