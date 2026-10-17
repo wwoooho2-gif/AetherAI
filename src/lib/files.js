@@ -1,10 +1,13 @@
 // Reading and editing dropped files in any language.
 import { readZipEntries } from "./zip.js";
+import { describeBinary } from "./binary.js";
 
-export const MAX_FILE_BYTES = 2_000_000; // per file
+export const MAX_FILE_BYTES = 2_000_000; // per text file
+export const MAX_BINARY_BYTES = 60_000_000; // per binary file (only a short summary is kept)
 export const MAX_TOTAL_FILES = 200; // per drop / per zip
 const SKIP_DIRS = /(^|\/)(node_modules|\.git|dist|build|__pycache__|\.venv|venv|target|\.next|\.idea|\.vscode)(\/|$)/;
-const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|bmp|pdf|zip|gz|tgz|tar|7z|rar|exe|dll|so|dylib|bin|class|jar|wasm|woff2?|ttf|otf|eot|mp[34]|mov|avi|webm|wav|ogg|gguf|pack|idx|rev|lock)$/i;
+// Media/archives we can't describe usefully. Every other binary (dll, exe, so, class, wasm, pdf, docx…) is summarised.
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|bmp|tiff?|heic|mp[34]|m4a|mov|avi|mkv|webm|wav|ogg|flac|woff2?|ttf|otf|eot|gz|tgz|tar|7z|rar|xz|bz2|gguf|pack|idx|rev|lock)$/i;
 
 /** Guess the language from a filename (used for code fences). */
 const LANGS = {
@@ -14,6 +17,9 @@ const LANGS = {
   sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell", bat: "batch", sql: "sql", html: "html", htm: "html",
   css: "css", scss: "scss", json: "json", yml: "yaml", yaml: "yaml", toml: "toml", xml: "xml", md: "markdown",
   vue: "vue", svelte: "svelte", gd: "gdscript", scala: "scala", hs: "haskell", ex: "elixir", exs: "elixir", zig: "zig",
+  luau: "lua", jl: "julia", pl: "perl", pm: "perl", clj: "clojure", erl: "erlang", ml: "ocaml", fs: "fsharp", vb: "vbnet",
+  asm: "nasm", s: "asm", nim: "nim", cr: "crystal", v: "v", groovy: "groovy", gradle: "groovy", m: "objectivec", mm: "objectivec",
+  sol: "solidity", tf: "hcl", proto: "protobuf", graphql: "graphql", ini: "ini", cfg: "ini", txt: "", cmake: "cmake", mk: "makefile",
 };
 export const languageOf = (name) => LANGS[String(name).split(".").pop().toLowerCase()] || "";
 
@@ -37,10 +43,16 @@ const displayPath = (file) => file.webkitRelativePath || file.relativePath || fi
 export async function readAttachments(fileList) {
   const accepted = [];
   const rejected = [];
-  const add = (name, bytes) => {
+  const add = async (name, bytes) => {
     if (accepted.length >= MAX_TOTAL_FILES) return rejected.push(`${name} (more than ${MAX_TOTAL_FILES} files)`);
     if (SKIP_DIRS.test(name)) return undefined;
-    if (BINARY_EXT.test(name) || !looksLikeText(bytes)) return rejected.push(`${name} (binary file)`);
+    if (BINARY_EXT.test(name)) return rejected.push(`${name} (media/archive)`);
+    if (!looksLikeText(bytes) || /\.(dll|exe|sys|ocx|so|dylib|class|wasm|bin|o|obj|a|lib|pdf|docx|xlsx|pptx|odt|ods|odp)$/i.test(name)) {
+      if (bytes.length > MAX_BINARY_BYTES) return rejected.push(`${name} (over ${Math.round(MAX_BINARY_BYTES / 1e6)} MB)`);
+      const summary = await describeBinary(name, bytes);
+      accepted.push({ name, content: summary, size: bytes.length, readOnly: true });
+      return undefined;
+    }
     if (bytes.length > MAX_FILE_BYTES) return rejected.push(`${name} (over ${Math.round(MAX_FILE_BYTES / 1e6)} MB)`);
     accepted.push({ name, content: decodeText(bytes), size: bytes.length });
     return undefined;
@@ -55,21 +67,17 @@ export async function readAttachments(fileList) {
             rejected.push(`${entry.name} (password-protected)`);
           } else if (SKIP_DIRS.test(entry.name) || BINARY_EXT.test(entry.name)) {
             continue;
-          } else if (entry.size > MAX_FILE_BYTES) {
-            rejected.push(`${entry.name} (over ${Math.round(MAX_FILE_BYTES / 1e6)} MB)`);
+          } else if (entry.size > MAX_BINARY_BYTES) {
+            rejected.push(`${entry.name} (over ${Math.round(MAX_BINARY_BYTES / 1e6)} MB)`);
           } else {
             // Keep the archive's own folder layout; only add a prefix when it isn't already there.
             const stem = file.name.replace(/\.zip$/i, "");
-            add(entry.name.startsWith(`${stem}/`) ? entry.name : `${stem}/${entry.name}`, await entry.bytes());
+            await add(entry.name.startsWith(`${stem}/`) ? entry.name : `${stem}/${entry.name}`, await entry.bytes());
           }
         }
       } else {
         if (SKIP_DIRS.test(name)) continue;
-        if (file.size > MAX_FILE_BYTES) {
-          rejected.push(`${name} (over ${Math.round(MAX_FILE_BYTES / 1e6)} MB)`);
-          continue;
-        }
-        add(name, new Uint8Array(await file.arrayBuffer()));
+        await add(name, new Uint8Array(await file.arrayBuffer()));
       }
     } catch (error) {
       rejected.push(`${name} (${error.message || "could not read"})`);
@@ -175,4 +183,5 @@ export const EDIT_PROMPT =
   "Attached files appear as FILE blocks. To change a file do NOT rewrite it; output one block per file: " +
   "```edit filename=\"path/name.ext\"\n<<<<<<< SEARCH\nexact existing lines\n=======\nnew lines\n>>>>>>> REPLACE\n``` " +
   "(several SEARCH/REPLACE pairs are fine; SEARCH must match the file exactly and be unique). " +
-  "Give a whole file only when creating a new one or when most of it changes. Works for any language.";
+  "Give a whole file only when creating a new one or when most of it changes. Works for any language. " +
+  "Files marked as binary analysis (dll, exe, pdf…) are read-only summaries: explain or reimplement them in text, but never edit them with a block.";

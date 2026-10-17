@@ -153,12 +153,21 @@ export async function requestSpeechAudio(http, apiKey, text, { rate = 1, isStati
     });
   } else {
     // Hosted site, or a TTS server on your own machine: straight from the browser (needs CORS enabled there).
-    response = await fetch(http.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-      body: JSON.stringify(body),
-      signal,
-    });
+    try {
+      response = await fetch(http.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      // A bare "NetworkError"/"Failed to fetch" here means the browser blocked the call, almost always CORS.
+      throw new Error(
+        `The browser blocked the request to ${new URL(http.url).hostname} (it doesn't allow calls from web pages, or an ad-blocker/offline is in the way). ` +
+        "Use the local app (npm run dev), which makes the call for you, or switch Voice engine to Browser voices.",
+      );
+    }
   }
   const type = response.headers.get("content-type") || "";
   if (!response.ok) {

@@ -3,6 +3,13 @@
 import wasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url";
 // Static (hosted) mode: set at build time, or detected at runtime on *.github.io so a build made
 // without VITE_STATIC still behaves correctly on GitHub Pages.
+export const IS_MOBILE =
+  typeof navigator !== "undefined" &&
+  (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform || "")));
+// Context window used in the browser. Smaller on phones: less memory, quicker start, faster replies.
+export const BROWSER_CONTEXT = IS_MOBILE ? 2048 : 4096;
+// Biggest model we try on a phone (bytes). Bigger ones crash the tab, so we say so up front instead.
+const MOBILE_MAX_MODEL = (typeof navigator !== "undefined" && navigator.deviceMemory && navigator.deviceMemory <= 3 ? 1.0 : 1.8) * 1e9;
 export const IS_STATIC =
   import.meta.env.VITE_STATIC === "1" ||
   (typeof window !== "undefined" && /(^|\.)github\.io$/.test(window.location.hostname));
@@ -78,6 +85,7 @@ let activeDownload = null; // AbortController for a running URL download
 
 const STORE_DIR = "aether-models";
 const LAST_MODEL_KEY = "aether-last-browser-model";
+const RESTORING_KEY = "aether-restoring-model";
 
 // -- loader state (observed by the UI through subscribeLoader / getLoaderState) ------------
 // phase: idle | downloading | loading | ready | error
@@ -125,7 +133,8 @@ async function assertGguf(file) {
 
 // -- on-device storage (Origin Private File System) -----------------------------------------
 async function storeRoot() {
-  if (!navigator.storage?.getDirectory) return null;
+  // iOS Safari can read OPFS but has no createWritable(); skip on-device saving there instead of failing the load.
+  if (!navigator.storage?.getDirectory || typeof FileSystemFileHandle === "undefined" || !("createWritable" in FileSystemFileHandle.prototype)) return null;
   try {
     const root = await navigator.storage.getDirectory();
     return await root.getDirectoryHandle(STORE_DIR, { create: true });
@@ -234,7 +243,8 @@ async function startRuntime(blobs, name, size, onProgress) {
   const instance = new Wllama({ default: wasmUrl }, { suppressNativeLog: true });
   try {
     await instance.loadModel(blobs, {
-      n_ctx: 4096, // a smaller context keeps memory use down (the model default can be 32k+)
+      n_ctx: BROWSER_CONTEXT, // a smaller context keeps memory use down (the model default can be 32k+)
+      n_batch: IS_MOBILE ? 256 : 512,
       n_gpu_layers: 0, // CPU only: WebGPU is faster but crashes on many machines/models
       progressCallback: ({ loaded, total }) => {
         if (total) onProgress?.(Math.round((loaded / total) * 100));
@@ -277,6 +287,11 @@ export async function loadBrowserModel(input, options = {}) {
   }
   const primary = files[0].name;
   const size = files.reduce((sum, file) => sum + file.size, 0);
+  if (IS_MOBILE && size > MOBILE_MAX_MODEL) {
+    const message = `${primary} is ${formatBytes(size)}, too big for a phone browser and it would crash the tab. Pick a model under ${formatBytes(MOBILE_MAX_MODEL)} (the ones marked "phone" in the list).`;
+    setLoaderState({ phase: "error", percent: null, error: message, message: "" });
+    throw new Error(message);
+  }
   try {
     setLoaderState({ phase: "loading", percent: 0, error: "", message: `Loading ${primary} into the browser…` });
     await assertGguf(files[0]);
@@ -408,12 +423,23 @@ export async function loadSavedModel(name) {
 export async function restoreLastModel() {
   const last = readLastModel();
   if (!last || browserModel || loaderState.phase === "loading" || loaderState.phase === "downloading") return null;
+  // If the tab died while restoring last time (out of memory), don't loop: skip the auto-restore once.
+  try {
+    if (localStorage.getItem(RESTORING_KEY)) {
+      localStorage.removeItem(RESTORING_KEY);
+      setLoaderState({ phase: "error", error: "The last model crashed this browser tab while reopening, so it wasn't restored. Pick a smaller one from the list." });
+      return null;
+    }
+    localStorage.setItem(RESTORING_KEY, "1");
+  } catch { /* storage blocked */ }
   const files = await readSavedFiles(last).catch(() => null);
-  if (!files) { rememberLastModel(""); return null; }
+  if (!files) { rememberLastModel(""); try { localStorage.removeItem(RESTORING_KEY); } catch { /* */ } return null; }
   try {
     return await loadBrowserModel(files, { fromStore: true });
   } catch {
     return null; // the loader state already carries the error for the UI
+  } finally {
+    try { localStorage.removeItem(RESTORING_KEY); } catch { /* storage blocked */ }
   }
 }
 
@@ -448,6 +474,7 @@ function browserChat(payload) {
         messages,
         max_tokens: payload.max_tokens || 1024,
         temperature: payload.temperature ?? 0.7,
+        useCache: true, // reuse the already-processed start of the prompt (system prompt + older turns)
       });
       const content = result?.choices?.[0]?.message?.content ?? "";
       return json(200, { choices: [{ message: { role: "assistant", content } }] });
@@ -468,6 +495,25 @@ function browserChat(payload) {
   return next;
 }
 
+// -- multi-model support: every saved model stays listed, one is loaded into memory at a time --
+const sameModel = (a, b) => Boolean(a && b) && baseName(a).toLowerCase() === baseName(b).toLowerCase();
+
+function bodyModelName(init) {
+  try { return String(JSON.parse(init?.body ?? "{}").model || ""); } catch { return ""; }
+}
+
+async function allKnownModels() {
+  const saved = await listSavedModels().catch(() => []);
+  const models = saved.map((item) => ({
+    name: item.name,
+    displayName: displayNameOf(item.name),
+    size: item.size,
+    modifiedAt: 0,
+  }));
+  if (browserModel && !models.some((item) => sameModel(item.name, browserModel.name))) models.unshift(browserModel);
+  return models;
+}
+
 let staticBackendInstalled = false;
 
 export function installStaticBackend(force = false) {
@@ -482,14 +528,31 @@ export function installStaticBackend(force = false) {
       try { payload = JSON.parse(init?.body ?? "{}"); } catch { /* ignore */ }
       return cloudChat(payload);
     }
-    if (raw.startsWith("/__aether/gguf/models")) return json(200, { models: browserModel ? [browserModel] : [] });
+    if (raw.startsWith("/__aether/gguf/models")) return json(200, { models: await allKnownModels() });
     if (raw.startsWith("/__aether/model-manager/reload")) {
+      const wanted = bodyModelName(init);
+      if (wanted && !sameModel(browserModel?.name, wanted)) {
+        // Switch to another model that was saved on this device earlier.
+        const saved = (await listSavedModels().catch(() => [])).find((item) => sameModel(item.name, wanted));
+        if (!saved) return json(404, { error: "That model is no longer saved on this device. Load the GGUF file again." });
+        try {
+          await loadSavedModel(saved.name);
+        } catch (error) {
+          return json(500, { error: error?.message || "Could not load that model." });
+        }
+      }
       return browserModel
         ? json(200, { status: "loaded", model: browserModel.name, modelId: browserModel.name })
         : json(404, { error: "That model is no longer loaded. Upload the GGUF file again." });
     }
     if (raw.startsWith("/__aether/model-manager/remove")) {
-      await unloadBrowserModel();
+      // Only the model the visitor explicitly removes is deleted; other saved models stay.
+      const wanted = bodyModelName(init);
+      if (!wanted || sameModel(browserModel?.name, wanted)) await unloadBrowserModel();
+      if (wanted) {
+        const saved = (await listSavedModels().catch(() => [])).find((item) => sameModel(item.name, wanted));
+        await deleteSavedModel(saved?.name || wanted);
+      }
       return json(200, { status: "removed", warning: "" });
     }
     if (raw.startsWith("/__aether/model-manager")) return json(503, { error: LOCAL_ONLY, models: [] });
