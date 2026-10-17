@@ -905,6 +905,7 @@ function App() {
   const [localGgufModels, setLocalGgufModels] = useState([]);
   const [modelAction, setModelAction] = useState("");
   const [modelActionMessage, setModelActionMessage] = useState("");
+  const modelUploadInputRef = useRef(null);
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [responseFeedback, setResponseFeedback] = useState({});
   const [openMessageMenuIndex, setOpenMessageMenuIndex] = useState(null);
@@ -1184,7 +1185,7 @@ function App() {
         setSelectedModel({
           fileName: "",
           name: "No model installed",
-          note: "Add a GGUF model to ~/Models/Aether",
+          note: "Upload a GGUF model from this menu",
           speed: "",
           icon: "✳",
         });
@@ -1311,6 +1312,47 @@ function App() {
     } finally {
       setModelAction("");
     }
+  }
+
+  function uploadLocalModel(file) {
+    if (!file) return;
+    if (IS_STATIC) {
+      setModelActionMessage("Uploading models needs the local version of Aether (npm run dev). The hosted site can't store model files.");
+      return;
+    }
+    if (!/\.gguf$/i.test(file.name)) {
+      setModelActionMessage("Choose a .gguf model file.");
+      return;
+    }
+
+    const label = `Uploading ${file.name}`;
+    setModelAction(`upload:${file.name}`);
+    setModelActionMessage(`${label}... 0%`);
+
+    const request = new XMLHttpRequest();
+    request.open("POST", `/__aether/model-upload?name=${encodeURIComponent(file.name)}`);
+    request.setRequestHeader("Content-Type", "application/octet-stream");
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        setModelActionMessage(`${label}... ${Math.round((event.loaded / event.total) * 100)}%`);
+      }
+    };
+    request.onload = async () => {
+      let data = {};
+      try { data = JSON.parse(request.responseText); } catch { /* not JSON */ }
+      if (request.status >= 200 && request.status < 300) {
+        await refreshAvailableModels();
+        setModelActionMessage(data.warning || `${file.name} was added. Click it in the list to load it.`);
+      } else {
+        setModelActionMessage(data.error || `Upload failed (HTTP ${request.status}).`);
+      }
+      setModelAction("");
+    };
+    request.onerror = () => {
+      setModelActionMessage("Upload failed. Is the local Aether dev server still running?");
+      setModelAction("");
+    };
+    request.send(file);
   }
 
   function startNewChat() {
@@ -1957,7 +1999,7 @@ function App() {
                 <div className="model-menu">
                   <div className="menu-heading">CHOOSE A MODEL</div>
                   {visibleModels.length === 0 ? (
-                    <p className="model-empty">No GGUF models found in <code>~/Models/Aether</code>.</p>
+                    <p className="model-empty">No GGUF models found in <code>~/Models/Aether</code>. Upload one below.</p>
                   ) : visibleModels.map((model) => {
                     const localModel = getLocalGgufModel(model.fileName, localGgufModels);
                     const isLoaded = Boolean(getAvailableModelId(model, availableModelIds));
@@ -2011,6 +2053,25 @@ function App() {
                       </div>
                     );
                   })}
+                  <input
+                    ref={modelUploadInputRef}
+                    type="file"
+                    accept=".gguf"
+                    hidden
+                    onChange={(event) => {
+                      uploadLocalModel(event.target.files?.[0]);
+                      event.target.value = "";
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="menu-footnote model-sync-note model-sync-button"
+                    onClick={() => modelUploadInputRef.current?.click()}
+                    disabled={Boolean(modelAction)}
+                  >
+                    <FileUp size={12} />
+                    <span>Upload GGUF model…</span>
+                  </button>
                   <div className="menu-footnote">
                     <span className={`online-dot ${modelStatus === "ready" ? "" : "status-dot-muted"}`} />
                     {modelStatus === "ready"

@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readdirSync, lstatSync, statSync, unlinkSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { createWriteStream, existsSync, readdirSync, lstatSync, statSync, unlinkSync } from "node:fs";
+import { chmod, link, mkdir, open, readFile, rename, rm, statfs, unlink, writeFile } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -546,7 +547,7 @@ function listGgufModels() {
     .sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name));
 
   const newestModel = models[0];
-  if (newestModel && Date.now() - newestModel.modifiedAt >= modelStabilityMs) {
+  if (process.env.AETHER_KEEP_ALL_MODELS !== "1" && newestModel && Date.now() - newestModel.modifiedAt >= modelStabilityMs) {
     for (const oldModel of models.slice(1)) {
       const oldPath = path.join(modelDirectory, oldModel.name);
       try {
@@ -998,6 +999,96 @@ function modelManagementPlugin() {
   };
 }
 
+// UPLOAD-PLUGIN-START
+function modelUploadPlugin() {
+  const failure = (status, message) => Object.assign(new Error(message), { status });
+
+  return {
+    name: "aether-local-model-upload",
+    configureServer(server) {
+      server.middlewares.use("/__aether/model-upload", (request, response) => {
+        if (!isLocalSameOrigin(request)) {
+          sendJson(response, 403, { error: "A same-origin loopback request is required." });
+          return;
+        }
+        if (request.method !== "POST") {
+          response.writeHead(405, { Allow: "POST" }).end();
+          return;
+        }
+
+        const name = new URL(request.url || "/", "http://localhost").searchParams.get("name") || "";
+        if (
+          !name || name.includes("\0") || name.startsWith(".") ||
+          path.basename(name) !== name || !/\.gguf$/i.test(name)
+        ) {
+          sendJson(response, 400, { error: "Choose a .gguf model file." });
+          return;
+        }
+
+        const finalPath = path.join(modelDirectory, name);
+        const tempPath = path.join(modelDirectory, `.upload-${randomUUID()}.part`);
+        const declaredSize = Number(request.headers["content-length"]);
+
+        (async () => {
+          await mkdir(modelDirectory, { recursive: true });
+          if (existsSync(finalPath)) {
+            throw failure(409, `${name} is already in ~/Models/Aether. Rename the file or remove the old one first.`);
+          }
+          if (Number.isFinite(declaredSize) && declaredSize > 0) {
+            try {
+              const disk = await statfs(modelDirectory);
+              if (declaredSize > disk.bavail * disk.bsize) {
+                throw failure(507, "Not enough free disk space in ~/Models/Aether for this model.");
+              }
+            } catch (error) {
+              if (error.status) throw error; // statfs unsupported: skip the check
+            }
+          }
+
+          try {
+            await pipeline(request, createWriteStream(tempPath, { flags: "wx", mode: 0o644 }));
+
+            const handle = await open(tempPath, "r");
+            const header = Buffer.alloc(4);
+            let bytesRead = 0;
+            try {
+              ({ bytesRead } = await handle.read(header, 0, 4, 0));
+            } finally {
+              await handle.close();
+            }
+            if (bytesRead < 4 || header.toString("latin1") !== "GGUF") {
+              throw failure(400, "That file is not a valid GGUF model (missing GGUF header).");
+            }
+
+            try {
+              await link(tempPath, finalPath); // fails instead of overwriting an existing file
+            } catch (error) {
+              if (error.code === "EEXIST") throw failure(409, `${name} is already in ~/Models/Aether.`);
+              throw error;
+            }
+          } finally {
+            await unlink(tempPath).catch(() => {});
+          }
+
+          let warning = "";
+          try {
+            await requestLlamaManagement("/models?reload=1");
+          } catch (error) {
+            warning = `${name} was saved, but llama.cpp did not refresh its model list: ${error.message}`;
+            console.error(warning);
+          }
+          sendJson(response, 200, { status: "uploaded", model: name, size: statSync(finalPath).size, warning });
+        })().catch((error) => {
+          if (response.headersSent || response.destroyed) return;
+          if (!error.status) console.error("Model upload failed:", error);
+          sendJson(response, error.status || 500, { error: error.status ? error.message : "The model upload failed. Check the dev-server log." });
+        });
+      });
+    },
+  };
+}
+// UPLOAD-PLUGIN-END
+
 function trainingPlugin(hfToken) {
   async function getHuggingFaceToken() {
     try {
@@ -1366,6 +1457,7 @@ export default defineConfig(({ mode }) => {
       react(),
       ggufEditorPlugin(),
       modelManagementPlugin(),
+      modelUploadPlugin(),
       providerPlugin(),
       mediaPlugin(),
       trainingPlugin(hfToken),
