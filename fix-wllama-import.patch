@@ -1,0 +1,28 @@
+diff --git a/src/staticBackend.js b/src/staticBackend.js
+index cb256c7..8b07271 100644
+--- a/src/staticBackend.js
++++ b/src/staticBackend.js
+@@ -70,12 +70,18 @@ export function getBrowserModel() {
+ }
+ 
+ export async function loadBrowserModel(file, onProgress) {
+-  const [{ Wllama }, { default: WasmFromCDN }] = await Promise.all([
+-    import("@wllama/wllama"),
+-    import("@wllama/wllama/esm/wasm-from-cdn.js"),
+-  ]);
++  const { Wllama } = await import("@wllama/wllama");
++  // The .wasm files are loaded from the CDN at runtime (pinned to the installed version), so the
++  // build never has to resolve a file path inside the package.
++  const CDN = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm";
++  let wasmPaths;
++  try {
++    ({ default: wasmPaths } = await import(/* @vite-ignore */ `${CDN}/wasm-from-cdn.js`));
++  } catch {
++    wasmPaths = { default: `${CDN}/wasm/wllama.wasm` };
++  }
+   await unloadBrowserModel();
+-  const instance = new Wllama(WasmFromCDN);
++  const instance = new Wllama(wasmPaths);
+   try {
+     await instance.loadModel([file], {
+       progressCallback: ({ loaded, total }) => {
