@@ -1,0 +1,29 @@
+# Node / frontend build output
+node_modules/
+dist/
+.vite/
+
+# Python / local env files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Local model/tooling caches
+unsloth_compiled_cache/
+.ollama/
+.conda/
+.local/
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.log
+*.sqlite3
+*.vsix
+/public/aether-chat.vsix
