@@ -1361,7 +1361,7 @@ export default defineConfig(({ mode }) => {
   const hfToken = process.env.HF_TOKEN || env.HF_TOKEN;
 
   return {
-    base: "./",
+    base: '/AetherAI/',
     plugins: [
       react(),
       ggufEditorPlugin(),
