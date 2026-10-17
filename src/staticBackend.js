@@ -57,6 +57,74 @@ async function cloudChat(payload) {
   return json(200, { content });
 }
 
+
+// ---- In-browser GGUF runtime (wllama) for the hosted site -------------------------------
+// The visitor picks a .gguf from their own disk; it is read into browser memory and run with
+// WebAssembly. Nothing is uploaded anywhere. The model is forgotten when the tab is closed.
+let wllama = null;
+let browserModel = null; // { name, displayName, size, modifiedAt }
+let inferenceQueue = Promise.resolve();
+
+export function getBrowserModel() {
+  return browserModel;
+}
+
+export async function loadBrowserModel(file, onProgress) {
+  const [{ Wllama }, { default: WasmFromCDN }] = await Promise.all([
+    import("@wllama/wllama"),
+    import("@wllama/wllama/esm/wasm-from-cdn.js"),
+  ]);
+  await unloadBrowserModel();
+  const instance = new Wllama(WasmFromCDN);
+  try {
+    await instance.loadModel([file], {
+      progressCallback: ({ loaded, total }) => {
+        if (onProgress && total) onProgress(Math.round((loaded / total) * 100));
+      },
+    });
+  } catch (error) {
+    await instance.exit().catch(() => {});
+    throw error;
+  }
+  wllama = instance;
+  browserModel = {
+    name: file.name,
+    displayName: file.name.replace(/\.gguf$/i, ""),
+    size: file.size,
+    modifiedAt: Date.now(),
+  };
+  return browserModel;
+}
+
+export async function unloadBrowserModel() {
+  const old = wllama;
+  wllama = null;
+  browserModel = null;
+  if (old) await old.exit().catch(() => {});
+}
+
+function browserChat(payload) {
+  if (!wllama || !browserModel) return Promise.resolve(json(503, { error: "No model is loaded in the browser. Use Upload GGUF model first." }));
+  const run = async () => {
+    try {
+      const messages = (payload.messages || []).map((m) => ({ role: m.role, content: String(m.content ?? "") }));
+      const result = await wllama.createChatCompletion({
+        messages,
+        max_tokens: payload.max_tokens || 1024,
+        temperature: payload.temperature ?? 0.7,
+      });
+      const content = result?.choices?.[0]?.message?.content ?? "";
+      return json(200, { choices: [{ message: { role: "assistant", content } }] });
+    } catch (error) {
+      return json(500, { error: `The in-browser model failed: ${error?.message || error}` });
+    }
+  };
+  // one request at a time: the WebAssembly runtime has a single sequence
+  const next = inferenceQueue.then(run, run);
+  inferenceQueue = next.catch(() => {});
+  return next;
+}
+
 export function installStaticBackend() {
   if (!IS_STATIC) return;
   const realFetch = window.fetch.bind(window);
@@ -67,8 +135,24 @@ export function installStaticBackend() {
       try { payload = JSON.parse(init?.body ?? "{}"); } catch { /* ignore */ }
       return cloudChat(payload);
     }
-    if (raw.startsWith("/__aether/gguf/models") || raw.startsWith("/__aether/model-manager")) return json(503, { error: LOCAL_ONLY, models: [] });
+    if (raw.startsWith("/__aether/gguf/models")) return json(200, { models: browserModel ? [browserModel] : [] });
+    if (raw.startsWith("/__aether/model-manager/reload")) {
+      return browserModel
+        ? json(200, { status: "loaded", model: browserModel.name, modelId: browserModel.name })
+        : json(404, { error: "That model is no longer loaded. Upload the GGUF file again." });
+    }
+    if (raw.startsWith("/__aether/model-manager/remove")) {
+      await unloadBrowserModel();
+      return json(200, { status: "removed", warning: "" });
+    }
+    if (raw.startsWith("/__aether/model-manager")) return json(503, { error: LOCAL_ONLY, models: [] });
     if (raw.startsWith("/__aether/")) return json(503, { error: LOCAL_ONLY });
+    if (raw.startsWith("/v1/models")) return json(200, { data: browserModel ? [{ id: browserModel.name }] : [] });
+    if (raw.startsWith("/v1/chat/completions")) {
+      let payload = {};
+      try { payload = JSON.parse(init?.body ?? "{}"); } catch { /* ignore */ }
+      return browserChat(payload);
+    }
     if (raw.startsWith("/v1/")) return json(503, { error: "No local llama.cpp server on the hosted site." });
     if (raw.startsWith("/search/stackoverflow")) return realFetch(raw.replace("/search/stackoverflow", "https://api.stackexchange.com/2.3/search/excerpts"), init);
     if (raw.startsWith("/search/github")) return realFetch(raw.replace("/search/github", "https://api.github.com/search/repositories"), init);

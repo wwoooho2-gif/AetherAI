@@ -29,7 +29,7 @@ import {
   X,
 } from "lucide-react";
 
-import { IS_STATIC } from "./staticBackend.js";
+import { IS_STATIC, loadBrowserModel } from "./staticBackend.js";
 const API_BASE = window.AETHER_API_BASE || "/v1";
 const SEARCH_BASE = window.AETHER_SEARCH_BASE || "/search";
 const CODING_PREFERENCES_KEY = "aether-coding-preferences";
@@ -1316,12 +1316,28 @@ function App() {
 
   function uploadLocalModel(file) {
     if (!file) return;
-    if (IS_STATIC) {
-      setModelActionMessage("Uploading models needs the local version of Aether (npm run dev). The hosted site can't store model files.");
-      return;
-    }
     if (!/\.gguf$/i.test(file.name)) {
       setModelActionMessage("Choose a .gguf model file.");
+      return;
+    }
+    if (IS_STATIC) {
+      // Hosted site: run the model inside the browser instead of copying it to ~/Models/Aether.
+      setModelAction(`upload:${file.name}`);
+      setModelActionMessage(`Loading ${file.name} into the browser... 0%`);
+      loadBrowserModel(file, (percent) =>
+        setModelActionMessage(`Loading ${file.name} into the browser... ${percent}%`),
+      )
+        .then(async () => {
+          await refreshAvailableModels();
+          setModelActionMessage(`${file.name} is loaded in your browser. Click it in the list to use it.`);
+        })
+        .catch((error) => {
+          console.error("Could not load the GGUF in the browser:", error);
+          setModelActionMessage(
+            `Could not load ${file.name}: ${error?.message || error}. Files over 2 GB must be split with llama-gguf-split, or use the local version.`,
+          );
+        })
+        .finally(() => setModelAction(""));
       return;
     }
 
@@ -2070,7 +2086,7 @@ function App() {
                     disabled={Boolean(modelAction)}
                   >
                     <FileUp size={12} />
-                    <span>Upload GGUF model…</span>
+                    <span>{IS_STATIC ? "Load GGUF in browser…" : "Upload GGUF model…"}</span>
                   </button>
                   <div className="menu-footnote">
                     <span className={`online-dot ${modelStatus === "ready" ? "" : "status-dot-muted"}`} />
