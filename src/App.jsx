@@ -37,7 +37,7 @@ import {
   X,
 } from "lucide-react";
 
-import { matchModelRequest, modelListText } from "./lib/models.js";
+import { HOSTED_MAX_MB, matchModelRequest, modelListText } from "./lib/models.js";
 import { IS_STATIC, IS_MOBILE, BROWSER_CONTEXT, installStaticBackend, loadBrowserModel, loadBrowserModelFromUrl, getLoaderState, subscribeLoader, restoreLastModel } from "./staticBackend.js";
 import ModelLoader from "./ModelLoader.jsx";
 import { createZip } from "./lib/zip.js";
@@ -1810,12 +1810,16 @@ function App() {
     setMessages((current) => [...current, { role: "user", content, requestContent: content, compactContent: content, time: now }]);
     setDraft("");
     if (request.list) {
-      say(`${request.term ? `I don't know "${request.term}". ` : ""}${modelListText()}`);
+      say(`${request.term ? `I don't know "${request.term}". ` : ""}${modelListText(IS_STATIC)}`);
       return;
     }
     if (!IS_STATIC) {
       const file = request.url?.split("/").pop();
       say(`This is the local app, which uses your llama.cpp server. Download it with:\n\n\`\`\`bash\nsh scripts/download-model.sh ${request.url ? request.url.replace("https://huggingface.co/", "").split("/resolve/main/")[0] : "<owner/repo>"} ${file || "<file.gguf>"}\n\`\`\``);
+      return;
+    }
+    if (request.entry && request.entry.mb > HOSTED_MAX_MB) {
+      say(`${request.entry.label} is too big for the website. Bigger models only work if you download the project and run it on your own computer (npm install, then npm run dev).`);
       return;
     }
     say(`Downloading ${request.entry?.label || "that model"}… progress shows above the message box. I'll tell you when it's ready.`);

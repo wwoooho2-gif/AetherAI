@@ -1024,3 +1024,8 @@ html { scroll-behavior: smooth; }
 /* hide scrollbars everywhere (scrolling still works) */
 * { scrollbar-width: none; -ms-overflow-style: none; }
 *::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* dropdowns inside the Voice panel open inline (the panel scrolls, so a floating menu would be clipped) */
+.voice-panel .custom-select-popup { position: static; margin-top: 4px; }
+.voice-panel .custom-select-menu { max-height: 190px; overflow-y: auto; }
+.voice-panel .custom-select-trigger { min-height: 32px; padding: 6px 8px; font-size: 12px; }

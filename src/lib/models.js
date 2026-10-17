@@ -1,6 +1,8 @@
 // Starter models for the in-browser loader (all GGUF, 4-bit unless noted). "phone" = small enough for most phones.
 // Any other .gguf can still be dropped in or pasted as a link.
 const HF = "https://huggingface.co";
+// The hosted website runs models inside the browser, so it only offers models up to this size (MB).
+export const HOSTED_MAX_MB = 1000;
 export const MODEL_CATALOG = [
   { group: "Tiny", label: "SmolLM2 135M (instant, basic)", mb: 105, phone: true, url: `${HF}/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf` },
   { group: "Tiny", label: "Gemma 3 270M", mb: 253, phone: true, url: `${HF}/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q4_K_M.gguf` },
@@ -20,7 +22,18 @@ export const MODEL_CATALOG = [
   { group: "General", label: "Gemma 2 2B", mb: 1700, phone: true, url: `${HF}/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf` },
   { group: "General", label: "Qwen2.5 3B", mb: 2000, url: `${HF}/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf` },
   { group: "General", label: "Llama 3.2 3B", mb: 2000, url: `${HF}/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf` },
+  // Bigger models: only offered when the project runs on your own computer (the hosted website stays small).
+  { group: "Coding", label: "Qwen2.5 Coder 7B", mb: 4680, url: `${HF}/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf` },
+  { group: "Coding", label: "Qwen2.5 Coder 14B", mb: 8990, url: `${HF}/bartowski/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf` },
+  { group: "Coding", label: "DeepSeek R1 Distill 7B (reasoning)", mb: 4680, url: `${HF}/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf` },
+  { group: "General", label: "Qwen3.5 4B", mb: 2740, url: `${HF}/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf` },
+  { group: "General", label: "Mistral 7B v0.3", mb: 4370, url: `${HF}/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf` },
+  { group: "General", label: "Llama 3.1 8B", mb: 4920, url: `${HF}/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` },
+  { group: "General", label: "Gemma 2 9B", mb: 5760, url: `${HF}/bartowski/gemma-2-9b-it-GGUF/resolve/main/gemma-2-9b-it-Q4_K_M.gguf` },
 ];
+
+/** Models to offer: everything on your own computer, only the small ones on the hosted website. */
+export const modelsFor = (isStatic) => (isStatic ? MODEL_CATALOG.filter((m) => m.mb <= HOSTED_MAX_MB) : MODEL_CATALOG);
 
 const norm = (text) => String(text).toLowerCase().replace(/[^a-z0-9.]+/g, " ").trim();
 
@@ -45,6 +58,13 @@ export function matchModelRequest(text) {
   return slash ? { list: true, term, explicit: true } : null;
 }
 
-export const modelListText = () =>
-  ["Small models I can download. Say \"download <name>\" or \"/model <name>\":", ...MODEL_CATALOG.map((m) => `- ${m.label} (${m.group}, ${m.mb >= 1000 ? (m.mb / 1000).toFixed(1) + " GB" : m.mb + " MB"}${m.phone ? ", phone ok" : ""})`),
-    "You can also give me a direct link to any .gguf file: /model https://…"].join("\n");
+export const modelListText = (isStatic) => {
+  const line = (m) => `- ${m.label} (${m.group}, ${m.mb >= 1000 ? (m.mb / 1000).toFixed(1) + " GB" : m.mb + " MB"}${m.phone ? ", phone ok" : ""})`;
+  return [
+    "Models I can download. Say \"download <name>\" or \"/model <name>\":",
+    ...modelsFor(isStatic).map(line),
+    isStatic
+      ? `Bigger models (up to 14B) are only offered when you download the project and run it on your own computer. You can also give me a direct link to any small .gguf: /model https://…`
+      : "You can also give me a direct link to any .gguf: /model https://…",
+  ].join("\n");
+};

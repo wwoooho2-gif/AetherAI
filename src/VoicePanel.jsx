@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Square, Volume2, X } from "lucide-react";
+import CustomSelect from "./CustomSelect.jsx";
 import { DEFAULT_BODY_TEMPLATE, HOPPOU_PRESET, isHoppou } from "./lib/tts.js";
 
 // Read-aloud settings. Everything except the API key is saved in this browser; the key lives in memory only.
@@ -40,19 +41,21 @@ export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, spe
 
       <div className="voice-row">
         <span>Voice engine</span>
-        <select
+        <CustomSelect
+          id="voice-engine"
+          ariaLabel="Voice engine"
           value={settings.engine === "browser" ? "browser" : hoppou ? "hoppou" : "http"}
-          onChange={(event) => {
-            const choice = event.target.value;
+          options={[
+            { value: "browser", label: "Built-in (this device)" },
+            { value: "hoppou", label: "hoppou.ai" },
+            { value: "http", label: "Other service (any TTS API)" },
+          ]}
+          onChange={(choice) => {
             if (choice === "browser") set({ engine: "browser" });
             else if (choice === "hoppou") onSettings({ ...settings, engine: "http", http: { ...HOPPOU_PRESET } });
             else set({ engine: "http", http: hoppou ? { ...settings.http, url: "" } : settings.http });
           }}
-        >
-          <option value="browser">Built-in (this device)</option>
-          <option value="hoppou">hoppou.ai</option>
-          <option value="http">Other service (any TTS API)</option>
-        </select>
+        />
       </div>
 
       {settings.engine === "browser" ? (
@@ -60,12 +63,16 @@ export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, spe
           {!hasBrowserVoice && <p className="voice-warn">This browser has no built-in text-to-speech. Use a custom service instead.</p>}
           <div className="voice-row">
             <span>Voice</span>
-            <select value={settings.voiceURI} onChange={(event) => set({ voiceURI: event.target.value })}>
-              <option value="">Default</option>
-              {voices.map((voice) => (
-                <option key={voice.voiceURI} value={voice.voiceURI}>{voice.name} ({voice.lang})</option>
-              ))}
-            </select>
+            <CustomSelect
+              id="voice-voice"
+              ariaLabel="Voice"
+              value={settings.voiceURI || ""}
+              options={[
+                { value: "", label: "Default" },
+                ...voices.map((voice) => ({ value: voice.voiceURI, label: `${voice.name} (${voice.lang})` })),
+              ]}
+              onChange={(voiceURI) => set({ voiceURI })}
+            />
           </div>
           <div className="voice-row">
             <span>Pitch {settings.pitch.toFixed(1)}</span>

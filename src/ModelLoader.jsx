@@ -12,7 +12,7 @@ import {
   subscribeLoader,
   IS_MOBILE,
 } from "./staticBackend.js";
-import { MODEL_CATALOG } from "./lib/models.js";
+import { modelsFor } from "./lib/models.js";
 
 const formatSize = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
 
@@ -178,14 +178,14 @@ export default function ModelLoader({ compact = false, onLoaded }) {
       )}
 
       <p className="model-big-note">
-        Bigger models (above about 2–3 GB) and faster speeds only work if you download the project and run it on your own computer. This website runs models inside your browser, so it is limited to small ones{IS_MOBILE ? ", especially on a phone" : ""}.
+        Bigger models (several GB) and faster speeds are only offered and only work if you download the project and run it on your own computer. This website runs models inside your browser, so it is limited to small ones{IS_MOBILE ? ", especially on a phone" : ""}.
       </p>
 
       {!compact && (
         <div className="model-starters">
           <span className="model-saved-title">No model yet? Tap one to download it</span>
           <div className="model-starter-row">
-            {MODEL_CATALOG.filter((model) => !IS_MOBILE || model.phone).map((model) => (
+            {modelsFor(true).filter((model) => !IS_MOBILE || model.phone).map((model) => (
               <button
                 key={model.url}
                 type="button"
