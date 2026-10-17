@@ -177,6 +177,10 @@ export default function ModelLoader({ compact = false, onLoaded }) {
         </div>
       )}
 
+      <p className="model-big-note">
+        Bigger models (above about 2–3 GB) and faster speeds only work if you download the project and run it on your own computer. This website runs models inside your browser, so it is limited to small ones{IS_MOBILE ? ", especially on a phone" : ""}.
+      </p>
+
       {!compact && (
         <div className="model-starters">
           <span className="model-saved-title">No model yet? Tap one to download it</span>

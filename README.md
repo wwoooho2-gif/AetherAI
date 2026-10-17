@@ -18,6 +18,8 @@
 - **Use the web** when you want it: search, photos, image generation, HTML previews, and file or zip editing.
 - **Read replies aloud** with built-in voices or [hoppou.ai](https://hoppou.ai).
 
+> **Hosted site limits:** it runs models inside your browser, so only small models work, and online or custom text-to-speech services (like hoppou.ai) are usually blocked by the browser. For bigger models and custom voices, download the project and run it on your own computer (below).
+
 ## Quick start (local app)
 
 ```sh

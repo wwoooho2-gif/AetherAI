@@ -888,7 +888,7 @@ input.preferences-field::placeholder { color: #858696; opacity: 1; }
 .model-saved-row button:disabled, .model-starter-row button:disabled { opacity: .5; cursor: not-allowed; }
 .model-saved-delete { display: grid; width: 34px; place-items: center; border: 1px solid #30313d; border-radius: 9px; background: #191a22; color: #8f90a0; cursor: pointer; }
 .model-saved-delete:hover:not(:disabled) { color: #f0b7ab; border-color: #5a342d; }
-.model-starter-row { max-height: 260px; overflow-y: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.model-starter-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .model-starter-row button { display: grid; gap: 2px; padding: 10px 11px; border: 1px solid #30313d; border-radius: 9px; color: #e6e6ef; background: #191a22; text-align: left; font-size: 12.5px; cursor: pointer; }
 .model-starter-row small { color: #8f90a0; font-size: 11px; }
 .model-loader-nudge { animation: model-nudge .5s ease 2; }
@@ -1017,3 +1017,10 @@ html { scroll-behavior: smooth; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
+
+.model-big-note, .voice-warn { margin: 2px 0 0; padding: 8px 10px; border: 1px solid #4a4130; border-radius: 9px; background: #231f15; color: #e7d9ae; font-size: 11.5px; line-height: 1.45; }
+.voice-warn code, .model-big-note code { font-size: 11px; }
+
+/* hide scrollbars everywhere (scrolling still works) */
+* { scrollbar-width: none; -ms-overflow-style: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }

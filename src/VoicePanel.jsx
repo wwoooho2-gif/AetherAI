@@ -27,6 +27,12 @@ export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, spe
         <button type="button" aria-label="Close voice settings" onClick={onClose}><X size={14} /></button>
       </header>
 
+      {isStatic && settings.engine !== "browser" && (
+        <p className="voice-hint voice-warn">
+          Heads up: on this hosted website, online and custom voice services (hoppou.ai and others) are usually blocked by the browser. They only work if you download the project and run it on your own computer (<code>npm install</code> then <code>npm run dev</code>). Browser voices work everywhere.
+        </p>
+      )}
+
       <label className="voice-check">
         <input type="checkbox" checked={settings.autoRead} onChange={(event) => set({ autoRead: event.target.checked })} />
         Read every reply aloud automatically
