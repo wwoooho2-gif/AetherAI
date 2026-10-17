@@ -917,7 +917,7 @@ function App() {
   const [toneStyle, setToneStyle] = useState("default");
   const [customTone, setCustomTone] = useState("");
   const [providerConfig, setProviderConfig] = useState({
-    provider: IS_STATIC ? "openai" : "local",
+    provider: "local",
     apiKey: "",
     model: "gpt-4o-mini",
     baseUrl: "https://api.openai.com/v1",
