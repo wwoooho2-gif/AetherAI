@@ -29,6 +29,7 @@ import {
   X,
 } from "lucide-react";
 
+import { IS_STATIC } from "./staticBackend.js";
 const API_BASE = window.AETHER_API_BASE || "/v1";
 const SEARCH_BASE = window.AETHER_SEARCH_BASE || "/search";
 const CODING_PREFERENCES_KEY = "aether-coding-preferences";
@@ -915,7 +916,7 @@ function App() {
   const [toneStyle, setToneStyle] = useState("default");
   const [customTone, setCustomTone] = useState("");
   const [providerConfig, setProviderConfig] = useState({
-    provider: "local",
+    provider: IS_STATIC ? "openai" : "local",
     apiKey: "",
     model: "gpt-4o-mini",
     baseUrl: "https://api.openai.com/v1",
