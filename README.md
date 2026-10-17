@@ -54,5 +54,3 @@ The hosted version includes an integrated loader, so no llama.cpp server is need
 Fine-tuning downloads its base model from Hugging Face. Those downloads can work without signing in, but Hugging Face may apply lower rate limits. Enter a read token in the **Hugging Face token** field on the Train a model screen. Aether stores it outside the project at `~/.config/aether/hf-token` with owner-only permissions, and provides a Remove button.
 
 Alternatively, set `HF_TOKEN` in the environment before starting Aether. Never commit or share your token. The trainer also migrates the deprecated `HF_HUB_ENABLE_HF_TRANSFER` setting to `HF_XET_HIGH_PERFORMANCE` when it starts.
-# AetherAI
-simple ai https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
