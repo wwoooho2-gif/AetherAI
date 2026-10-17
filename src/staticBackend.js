@@ -290,6 +290,7 @@ export async function loadBrowserModel(input, options = {}) {
   }
   rememberLastModel(primary);
   setLoaderState({ phase: "ready", percent: null, error: "", message: `${primary} is ready.`, model: browserModel });
+  warmUpModel();
 
   // Keep a copy in on-device storage so the next visit doesn't need the file again.
   if (remember && !fromStore) {
@@ -414,6 +415,20 @@ export async function restoreLastModel() {
   } catch {
     return null; // the loader state already carries the error for the UI
   }
+}
+
+// One throw-away token right after loading pages the weights in and warms up the WebAssembly code,
+// so the visitor's first real reply starts sooner. Best effort: failures are ignored.
+function warmUpModel() {
+  const instance = wllama;
+  if (!instance) return;
+  const run = async () => {
+    if (instance !== wllama) return;
+    try {
+      await instance.createChatCompletion({ messages: [{ role: "user", content: "Hi" }], max_tokens: 1, temperature: 0 });
+    } catch { /* warm-up only */ }
+  };
+  inferenceQueue = inferenceQueue.then(run, run);
 }
 
 export async function unloadBrowserModel() {

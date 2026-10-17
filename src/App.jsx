@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import CustomSelect from "./CustomSelect.jsx";
 const GgufEditor = lazy(() => import("./GgufEditor.jsx")); // only loaded when the editor tab is opened
+const CreditsPanel = lazy(() => import("./CreditsPanel.jsx")); // only loaded when the credits tab is opened
 import {
   ArrowUp,
   AlignLeft,
@@ -19,6 +20,8 @@ import {
   FileText,
   FolderOpen,
   Globe2,
+  Heart,
+  Volume2,
   ImagePlus,
   LoaderCircle,
   Plus,
@@ -26,6 +29,7 @@ import {
   RotateCw,
   Settings2,
   Sparkles,
+  Square,
   SquarePen,
   Trash2,
   ThumbsDown,
@@ -41,6 +45,9 @@ import { compactHistory, estimateTokens, headTail, packFiles } from "./lib/conte
 import { extractUrls, generateImage, searchImages, webSearch, formatResultsForPrompt } from "./lib/web.js";
 import { parseToolCalls, runToolCall, stripToolCalls, TOOL_PROMPT } from "./lib/tools.js";
 import { renderRich } from "./lib/markdown.jsx";
+import { createSpeaker, loadTtsSettings, saveTtsSettings } from "./lib/tts.js";
+const VoicePanel = lazy(() => import("./VoicePanel.jsx")); // only loaded when voice settings open
+import { clearChats, deleteChat, listChats, loadChat, requestDurableStorage, saveChat, storageAvailable } from "./lib/chatStore.js";
 const API_BASE = window.AETHER_API_BASE || "/v1";
 const CODING_PREFERENCES_KEY = "aether-coding-preferences";
 const RESPONSE_STYLE_KEY = "aether-response-style";
@@ -61,6 +68,7 @@ const responseStyleValues = [
   "custom",
 ];
 const initialMessages = [];
+const LAST_CHAT_KEY = "aether.lastChat.v1";
 const fileExtensions = {
   bash: "sh",
   c: "c",
@@ -936,6 +944,131 @@ function App() {
   const [toolStatus, setToolStatus] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const folderInputRef = useRef(null);
+  const [voiceSettings, setVoiceSettings] = useState(() => loadTtsSettings());
+  const [voiceKey, setVoiceKey] = useState(""); // memory only, never saved
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
+  const [speech, setSpeech] = useState({ state: "idle", id: null, error: "" });
+  const voiceSettingsRef = useRef(voiceSettings);
+  const voiceKeyRef = useRef(voiceKey);
+  voiceSettingsRef.current = voiceSettings;
+  voiceKeyRef.current = voiceKey;
+  const [speaker] = useState(() => createSpeaker({
+    getSettings: () => voiceSettingsRef.current,
+    getApiKey: () => voiceKeyRef.current,
+    isStatic: IS_STATIC,
+    onChange: setSpeech,
+  }));
+  useEffect(() => saveTtsSettings(voiceSettings), [voiceSettings]);
+  useEffect(() => () => speaker.stop(), [speaker]);
+
+  // ---- chats saved in this browser (IndexedDB) ---------------------------------------------------
+  const [chatId, setChatId] = useState(null);
+  const chatIdRef = useRef(null);
+  const [savedChats, setSavedChats] = useState([]);
+  const [storageNote, setStorageNote] = useState("");
+  const [hydrated, setHydrated] = useState(false);
+  const askedDurableRef = useRef(false);
+
+  function applyChat(chat) {
+    chatIdRef.current = chat.id;
+    setChatId(chat.id);
+    setMessages(chat.messages || []);
+    setAttachments(chat.attachments || []);
+    setResponseFeedback(chat.feedback || {});
+    setDraft("");
+    setAttachmentError("");
+    setOpenMessageMenuIndex(null);
+  }
+
+  // On load: show the saved list and reopen the chat you were last in.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!storageAvailable()) {
+        setStorageNote("Chats can’t be saved in this browser (private mode or storage blocked).");
+        return;
+      }
+      try {
+        setSavedChats(await listChats());
+        const lastId = window.localStorage.getItem(LAST_CHAT_KEY);
+        const chat = lastId ? await loadChat(lastId) : null;
+        if (chat && !cancelled) applyChat(chat);
+      } catch (error) {
+        console.warn("Could not read saved chats:", error);
+        setStorageNote("Couldn’t read saved chats from this browser.");
+      }
+    })().finally(() => {
+      if (!cancelled) setHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Autosave shortly after anything changes (waits until the first load has finished so it can't overwrite it).
+  useEffect(() => {
+    if (!hydrated || messages.length === 0 || !storageAvailable()) return undefined;
+    const timer = window.setTimeout(async () => {
+      try {
+        chatIdRef.current ??= crypto.randomUUID();
+        const meta = await saveChat({ id: chatIdRef.current, messages, attachments, feedback: responseFeedback });
+        setChatId(chatIdRef.current);
+        window.localStorage.setItem(LAST_CHAT_KEY, chatIdRef.current);
+        setSavedChats((current) => [meta, ...current.filter((chat) => chat.id !== meta.id)].sort((a, b) => b.updatedAt - a.updatedAt));
+        setStorageNote("");
+        if (!askedDurableRef.current) {
+          askedDurableRef.current = true;
+          requestDurableStorage();
+        }
+      } catch (error) {
+        console.warn("Could not save the chat:", error);
+        setStorageNote("This chat couldn’t be saved: browser storage is full or blocked.");
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [hydrated, messages, attachments, responseFeedback]);
+
+  async function openSavedChat(id) {
+    if (isThinking || id === chatIdRef.current) {
+      setActiveView("chat");
+      setMobileSidebarOpen(false);
+      return;
+    }
+    try {
+      const chat = await loadChat(id);
+      if (!chat) throw new Error("That chat is no longer saved.");
+      speaker.stop();
+      applyChat(chat);
+      window.localStorage.setItem(LAST_CHAT_KEY, id);
+      setActiveView("chat");
+      setMobileSidebarOpen(false);
+    } catch (error) {
+      setStorageNote(error.message);
+      setSavedChats(await listChats().catch(() => []));
+    }
+  }
+
+  async function deleteSavedChat(id) {
+    try {
+      await deleteChat(id);
+      setSavedChats((current) => current.filter((chat) => chat.id !== id));
+      if (id === chatIdRef.current) startNewChat();
+    } catch (error) {
+      setStorageNote(`Couldn’t delete that chat: ${error.message}`);
+    }
+  }
+
+  async function clearSavedChats() {
+    if (!window.confirm("Delete all chats saved in this browser? This can’t be undone.")) return;
+    try {
+      await clearChats();
+      setSavedChats([]);
+      startNewChat();
+    } catch (error) {
+      setStorageNote(`Couldn’t delete chats: ${error.message}`);
+    }
+  }
   const parsedMessages = useMemo(
     () => messages.map((message) => (
       message.role === "assistant" ? parseCodeArtifacts(message.content) : null
@@ -951,8 +1084,13 @@ function App() {
   const needsBrowserModel = IS_STATIC && providerConfig.provider === "local" && !loaderModel;
 
   // Bring back the model used last time (kept in on-device storage) when the page opens.
+  // Deferred until the browser is idle so the interface paints first.
   useEffect(() => {
-    if (IS_STATIC) restoreLastModel();
+    if (!IS_STATIC) return undefined;
+    const idle = window.requestIdleCallback || ((callback) => window.setTimeout(callback, 200));
+    const cancel = window.cancelIdleCallback || window.clearTimeout;
+    const handle = idle(() => restoreLastModel(), { timeout: 1500 });
+    return () => cancel(handle);
   }, []);
 
   // Whenever the in-browser model changes, switch to it and refresh the model list.
@@ -1354,6 +1492,10 @@ function App() {
   }
 
   function startNewChat() {
+    speaker.stop();
+    chatIdRef.current = null;
+    setChatId(null);
+    window.localStorage.removeItem(LAST_CHAT_KEY);
     setActiveView("chat");
     setMessages([]);
     setDraft("");
@@ -1662,6 +1804,7 @@ function App() {
     const content = value.trim();
     const unsent = attachments.filter((file) => !file.sent);
     if ((!content && unsent.length === 0) || isThinking) return;
+    speaker.stop();
     const now = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const command = content.match(/^\/(image|draw|photos?|zip)\b\s*([\s\S]*)$/i);
     if (command) {
@@ -1704,6 +1847,7 @@ function App() {
     })
       .then((result) => {
         setMessages((current) => [...current, replyMessage(result, now, modelName, filesBefore, { webUsed: searchHintEnabled })]);
+        if (voiceSettingsRef.current.autoRead) speaker.speak(history.length, result.text);
         const editedByName = new Map(result.files.filter((file) => file.edited).map((file) => [file.name, file]));
         if (editedByName.size) {
           setAttachments((current) => current.map((file) => (editedByName.has(file.name) ? { ...editedByName.get(file.name), sent: true } : file)));
@@ -1751,6 +1895,7 @@ function App() {
         loadedModelId: getAvailableModelId(selectedModel, availableModelIds),
       });
       setMessages((current) => [...current, replyMessage(result, now, modelName, filesBefore, { webUsed: messages[index].webUsed })]);
+      if (voiceSettingsRef.current.autoRead) speaker.speak(history.length, result.text);
       const editedByName = new Map(result.files.filter((file) => file.edited).map((file) => [file.name, file]));
       if (editedByName.size) {
         setAttachments((current) => current.map((file) => (editedByName.has(file.name) ? { ...editedByName.get(file.name), sent: true } : file)));
@@ -2149,7 +2294,39 @@ function App() {
             <BrainCircuit size={16} />
             <span>Edit GGUF weights</span>
           </button>
+          <button
+            className={`sidebar-nav-button ${activeView === "credits" ? "sidebar-nav-button-active" : ""}`}
+            aria-current={activeView === "credits" ? "page" : undefined}
+            onClick={() => {
+              setActiveView("credits");
+              setMobileSidebarOpen(false);
+            }}
+          >
+            <Heart size={16} />
+            <span>Credits</span>
+          </button>
         </div>
+
+        <nav className="chat-history" aria-label="Chats saved in this browser">
+          <div className="chat-history-head">
+            <span>Saved in this browser</span>
+            {savedChats.length > 0 && (
+              <button type="button" onClick={clearSavedChats} title="Delete all saved chats">Clear</button>
+            )}
+          </div>
+          {savedChats.length === 0 && !storageNote && <p className="chat-history-empty">Your chats appear here and stay after you refresh.</p>}
+          {savedChats.map((chat) => (
+            <div className={`chat-history-item${chat.id === chatId ? " is-active" : ""}`} key={chat.id}>
+              <button type="button" className="chat-history-open" disabled={isThinking} title={chat.title} onClick={() => openSavedChat(chat.id)}>
+                {chat.title}
+              </button>
+              <button type="button" className="chat-history-delete" aria-label={`Delete chat: ${chat.title}`} disabled={isThinking} onClick={() => deleteSavedChat(chat.id)}>
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          {storageNote && <p className="chat-history-note" role="status">{storageNote}</p>}
+        </nav>
 
         <div className="sidebar-bottom">
           <button
@@ -2294,7 +2471,7 @@ function App() {
           </div> : (
             <div className="fine-tune-topbar-title">
               <BrainCircuit size={16} />
-              <span>{activeView === "training" ? "Model workshop" : activeView === "media" ? "Media workshop" : "GGUF weight editor"}</span>
+              <span>{activeView === "training" ? "Model workshop" : activeView === "media" ? "Media workshop" : activeView === "credits" ? "Credits" : "GGUF weight editor"}</span>
             </div>
           )}
           <div className="topbar-spacer" />
@@ -2456,6 +2633,16 @@ function App() {
                         <div className="message-actions">
                           <button
                             type="button"
+                            aria-label={speech.id === index ? "Stop reading aloud" : "Read aloud"}
+                            title={speech.id === index ? "Stop reading" : "Read this reply out loud"}
+                            className={`listen-button${speech.id === index ? " is-selected" : ""}`}
+                            onClick={() => (speech.id === index ? speaker.stop() : speaker.speak(index, message.content))}
+                          >
+                            {speech.id === index ? <Square size={13} /> : <Volume2 size={14} />}
+                            <span>{speech.id === index ? (speech.state === "loading" ? "Loading… stop" : "Stop") : "Listen"}</span>
+                          </button>
+                          <button
+                            type="button"
                             aria-label={copiedIndex === index ? "Response copied" : "Copy response"}
                             title={copiedIndex === index ? "Copied" : "Copy response"}
                             onClick={() => copyMessage(message.content, index)}
@@ -2563,6 +2750,27 @@ function App() {
         <footer className="composer-area">
           {needsBrowserModel && messages.length > 0 && (
             <div className={loaderNudge ? "model-loader-nudge" : ""}><ModelLoader compact /></div>
+          )}
+          {speech.error && !voicePanelOpen && (
+            <p className="attachment-error voice-error" role="alert">
+              {speech.error}{" "}
+              <button type="button" className="voice-link" onClick={() => setVoicePanelOpen(true)}>Open voice settings</button>
+            </p>
+          )}
+          {voicePanelOpen && (
+            <Suspense fallback={null}>
+            <VoicePanel
+              settings={voiceSettings}
+              onSettings={setVoiceSettings}
+              apiKey={voiceKey}
+              onApiKey={setVoiceKey}
+              speech={speech}
+              isStatic={IS_STATIC}
+              onStop={() => speaker.stop()}
+              onClose={() => setVoicePanelOpen(false)}
+              onTest={() => speaker.speak("test", "This is how Aether sounds when it reads a reply out loud.")}
+            />
+            </Suspense>
           )}
           <div className="composer">
             <textarea
@@ -2678,6 +2886,14 @@ function App() {
                 >
                   <AlignLeft size={14} /><span>Long</span>
                 </button>
+                <button
+                  className={`tool-pill ${voiceSettings.autoRead || voicePanelOpen ? "tool-pill-active" : ""}`}
+                  aria-pressed={voicePanelOpen}
+                  title="Read replies aloud: voice settings"
+                  onClick={() => setVoicePanelOpen((open) => !open)}
+                >
+                  <Volume2 size={14} /><span>Voice</span>
+                </button>
               </div>
               <div className="send-group">
                 <button
@@ -2719,6 +2935,8 @@ function App() {
           />
         ) : activeView === "media" ? (
           <MediaWorkspace providerConfig={providerConfig} />
+        ) : activeView === "credits" ? (
+          <Suspense fallback={<p className="media-status">Loading…</p>}><CreditsPanel /></Suspense>
         ) : <Suspense fallback={<p className="media-status">Loading editor…</p>}><GgufEditor onModelSaved={refreshAvailableModels} /></Suspense>}
       </main>
       {preferencesOpen && (

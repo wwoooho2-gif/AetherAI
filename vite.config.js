@@ -1447,6 +1447,79 @@ function trainingPlugin(hfToken) {
   };
 }
 
+// ---- Text-to-speech proxy for the local app ----------------------------------------------------
+// POST /__aether/tts { url, apiKey?, body } -> audio bytes (or JSON with an audio link) from your TTS service.
+// Public https hosts only (same rule as custom AI providers). The key is used for this one call and never stored.
+const TTS_MAX_AUDIO = 25_000_000;
+
+async function requestTts({ url, apiKey, body }) {
+  if (typeof apiKey !== "string" || apiKey.length > 2000) throw Object.assign(new Error("The API key is invalid."), { status: 400 });
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw Object.assign(new Error("The voice request body must be a JSON object."), { status: 400 });
+  const payload = JSON.stringify(body);
+  if (payload.length > 20_000) throw Object.assign(new Error("That text is too long for one voice request."), { status: 413 });
+  const target = await validateCustomProviderUrl(url);
+  const upstream = await fetch(target, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "audio/*,application/json",
+      ...(apiKey.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {}),
+    },
+    body: payload,
+    redirect: "error",
+    signal: AbortSignal.timeout(60_000),
+  });
+  const type = upstream.headers.get("content-type") || "application/octet-stream";
+  if (!upstream.ok) {
+    const detail = (await upstream.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);
+    throw Object.assign(new Error(`The voice service answered HTTP ${upstream.status}${detail ? `: ${detail}` : ""}`), { status: 502 });
+  }
+  if (!/^(audio\/|application\/(json|octet-stream))/i.test(type)) {
+    throw Object.assign(new Error(`The voice service returned ${type}, not audio.`), { status: 502 });
+  }
+  const reader = upstream.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > TTS_MAX_AUDIO) {
+      reader.cancel().catch(() => {});
+      throw Object.assign(new Error("The audio was larger than 25 MB."), { status: 502 });
+    }
+    chunks.push(value);
+  }
+  return { type, bytes: Buffer.concat(chunks) };
+}
+
+function ttsPlugin() {
+  return {
+    name: "aether-tts-proxy",
+    configureServer(server) {
+      server.middlewares.use("/__aether/tts", (request, response) => {
+        if (!isLocalSameOrigin(request)) {
+          sendJson(response, 403, { error: "A same-origin loopback request is required." });
+          return;
+        }
+        if (request.method !== "POST") {
+          response.writeHead(405, { Allow: "POST" }).end();
+          return;
+        }
+        readJsonBody(request, response, async (payload) => {
+          try {
+            const result = await requestTts(payload || {});
+            response.writeHead(200, { "Content-Type": result.type, "Content-Length": result.bytes.length, "Cache-Control": "no-store" });
+            response.end(result.bytes);
+          } catch (error) {
+            sendJson(response, error.status || 502, { error: error.message || "The voice request failed." });
+          }
+        });
+      });
+    },
+  };
+}
+
 // ---- Web access for the local app --------------------------------------------------------------
 // /__aether/web/search?q=...  -> DuckDuckGo results (no API key)
 // /__aether/web/fetch?url=... -> readable text (+ raw html) of a public page
@@ -1603,6 +1676,20 @@ export default defineConfig(({ mode }) => {
 
   return {
     base: '/AetherAI/',
+    build: {
+      target: "es2020",
+      cssMinify: true,
+      chunkSizeWarningLimit: 900,
+      rollupOptions: {
+        output: {
+          // Stable vendor chunks cache between deploys, so repeat visits only re-download app code.
+          manualChunks(id) {
+            if (id.includes("node_modules/react") || id.includes("node_modules/scheduler")) return "react";
+            if (id.includes("node_modules/lucide-react")) return "icons";
+          },
+        },
+      },
+    },
     plugins: [
       react(),
       ggufEditorPlugin(),
@@ -1611,6 +1698,7 @@ export default defineConfig(({ mode }) => {
       providerPlugin(),
       mediaPlugin(),
       webPlugin(),
+      ttsPlugin(),
       trainingPlugin(hfToken),
     ],
     server: {
