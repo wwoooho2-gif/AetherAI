@@ -1025,7 +1025,25 @@ html { scroll-behavior: smooth; }
 * { scrollbar-width: none; -ms-overflow-style: none; }
 *::-webkit-scrollbar { display: none; width: 0; height: 0; }
 
-/* dropdowns inside the Voice panel open inline (the panel scrolls, so a floating menu would be clipped) */
-.voice-panel .custom-select-popup { position: static; margin-top: 4px; }
-.voice-panel .custom-select-menu { max-height: 190px; overflow-y: auto; }
+/* Voice panel dropdowns float over the panel like normal menus; the panel itself must not clip them */
+.voice-panel { max-height: none; overflow: visible; }
+.voice-panel .custom-select-popup { z-index: 40; }
+.voice-panel .custom-select-menu { max-height: 190px; overflow-y: auto; box-shadow: 0 10px 30px #000a; }
 .voice-panel .custom-select-trigger { min-height: 32px; padding: 6px 8px; font-size: 12px; }
+
+/* checkboxes: dark rounded box, purple with a tick when on (replaces the default browser checkbox) */
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; flex: none; display: inline-grid; place-content: center;
+  width: 18px; height: 18px; margin: 0; border: 1.5px solid #4a4960; border-radius: 6px;
+  background: #15161d; cursor: pointer; transition: background .15s, border-color .15s, box-shadow .15s;
+}
+input[type="checkbox"]::after {
+  content: ""; width: 9px; height: 5px; margin-top: -2px; border-left: 2px solid #fff; border-bottom: 2px solid #fff;
+  transform: rotate(-45deg) scale(0); transition: transform .12s;
+}
+input[type="checkbox"]:hover { border-color: #8f78d8; }
+input[type="checkbox"]:checked { background: #7d63d9; border-color: #7d63d9; }
+input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
+input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px #8f78d855; }
+input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
+.voice-check { padding: 6px 2px; user-select: none; }
