@@ -8,6 +8,17 @@ It includes:
 - a local model workshop for training prompts and behavior rules
 - a clean, single-project layout suitable for GitHub hosting
 
+## Run any GGUF in the browser (hosted site)
+
+The hosted version includes an integrated loader, so no llama.cpp server is needed:
+
+- Drop a `.gguf` file onto the loader, or click it to choose one (for split models, select every part at once).
+- Or paste a direct link to a `.gguf` (Hugging Face `blob` and `resolve` links both work), or use one of the starter models.
+- Models run in WebAssembly (llama.cpp via [wllama](https://github.com/ngxson/wllama)); nothing is uploaded anywhere.
+- The loaded model is saved in the browser's private storage and restored on the next visit. Delete it from the loader's "Saved on this device" list.
+- The runtime (`wllama.wasm`) is bundled into the build, so it works without a CDN.
+- Practical limits: CPU-only, so use small models (about 1B to 3B parameters at Q4, under 2 GB). Larger single files can run out of browser memory.
+
 ## Features
 
 - Browse local GGUF models in `~/Models/Aether`

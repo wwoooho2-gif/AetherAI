@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import CustomSelect from "./CustomSelect.jsx";
 import GgufEditor from "./GgufEditor.jsx";
 import {
@@ -29,7 +29,8 @@ import {
   X,
 } from "lucide-react";
 
-import { IS_STATIC, installStaticBackend, loadBrowserModel } from "./staticBackend.js";
+import { IS_STATIC, installStaticBackend, loadBrowserModel, getLoaderState, subscribeLoader, restoreLastModel } from "./staticBackend.js";
+import ModelLoader from "./ModelLoader.jsx";
 const API_BASE = window.AETHER_API_BASE || "/v1";
 const SEARCH_BASE = window.AETHER_SEARCH_BASE || "/search";
 const CODING_PREFERENCES_KEY = "aether-coding-preferences";
@@ -906,6 +907,9 @@ function App() {
   const [modelAction, setModelAction] = useState("");
   const [modelActionMessage, setModelActionMessage] = useState("");
   const modelUploadInputRef = useRef(null);
+  // Integrated in-browser loader (hosted site): the model currently running in this tab.
+  const loaderModel = useSyncExternalStore(subscribeLoader, () => getLoaderState().model);
+  const [loaderNudge, setLoaderNudge] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [responseFeedback, setResponseFeedback] = useState({});
   const [openMessageMenuIndex, setOpenMessageMenuIndex] = useState(null);
@@ -940,6 +944,29 @@ function App() {
   const bottomRef = useRef(null);
   const lastTrainingOutputRef = useRef("");
   const autoTrainingSetupStartedRef = useRef(false);
+  const needsBrowserModel = IS_STATIC && providerConfig.provider === "local" && !loaderModel;
+
+  // Bring back the model used last time (kept in on-device storage) when the page opens.
+  useEffect(() => {
+    if (IS_STATIC) restoreLastModel();
+  }, []);
+
+  // Whenever the in-browser model changes, switch to it and refresh the model list.
+  useEffect(() => {
+    if (!IS_STATIC) return;
+    if (loaderModel) {
+      setProviderConfig((current) => (current.provider === "local" ? current : { ...current, provider: "local" }));
+      setSelectedModel({
+        fileName: loaderModel.name,
+        name: loaderModel.displayName,
+        note: "Loaded in your browser",
+        speed: "",
+        icon: "✳",
+      });
+    }
+    refreshAvailableModels();
+  }, [loaderModel]);
+
   const additionalModels = availableModelIds
     .filter((modelId) => !models.some((model) => getAvailableModelId(model, [modelId])))
     .filter((modelId) => {
@@ -950,7 +977,7 @@ function App() {
       return {
         fileName: modelId,
         name: fileName.replace(/\.gguf$/i, ""),
-        note: "Installed local model",
+        note: IS_STATIC ? "Loaded in your browser" : "Installed local model",
         speed: "",
         icon: "✳",
       };
@@ -963,7 +990,7 @@ function App() {
     .map((model) => ({
       fileName: model.name,
       name: model.displayName || model.name.replace(/\.gguf$/i, ""),
-      note: "Local GGUF · restart llama.cpp to load",
+      note: IS_STATIC ? "Saved in your browser · click to load" : "Local GGUF · restart llama.cpp to load",
       speed: "",
       icon: "✳",
     }));
@@ -1185,7 +1212,7 @@ function App() {
         setSelectedModel({
           fileName: "",
           name: "No model installed",
-          note: "Upload a GGUF model from this menu",
+          note: IS_STATIC ? "Drop a GGUF below to start" : "Upload a GGUF model from this menu",
           speed: "",
           icon: "✳",
         });
@@ -1314,36 +1341,37 @@ function App() {
     }
   }
 
-  function loadFileInBrowser(file) {
-    // Run the model inside the browser instead of copying it to ~/Models/Aether.
+  function loadFileInBrowser(input) {
+    // Run the model inside the browser (integrated loader) instead of copying it to ~/Models/Aether.
     installStaticBackend(true);
-    setModelAction(`upload:${file.name}`);
-    setModelActionMessage(`Loading ${file.name} into the browser... 0%`);
-    loadBrowserModel(file, (percent) =>
-      setModelActionMessage(`Loading ${file.name} into the browser... ${percent}%`),
-    )
+    const files = input instanceof File ? [input] : Array.from(input || []);
+    const label = files[0]?.name || "model";
+    setModelAction(`upload:${label}`);
+    setModelActionMessage(`Loading ${label} into the browser...`);
+    loadBrowserModel(files)
       .then(async () => {
         setProviderConfig((current) => ({ ...current, provider: "local" }));
         await refreshAvailableModels();
-        setModelActionMessage(`${file.name} is loaded in your browser. Click it in the list to use it.`);
+        setModelMenuOpen(false);
+        setModelActionMessage(`${label} is loaded in your browser and ready to chat.`);
       })
       .catch((error) => {
         console.error("Could not load the GGUF in the browser:", error);
-        setModelActionMessage(
-          `Could not load ${file.name}: ${error?.message || error}. Files over 2 GB must be split with llama-gguf-split, or use the local version.`,
-        );
+        setModelActionMessage(`${error?.message || error} Files over 2 GB can be split with llama-gguf-split, or use the local version.`);
       })
       .finally(() => setModelAction(""));
   }
 
-  function uploadLocalModel(file) {
+  function uploadLocalModel(fileOrFiles) {
+    const picked = Array.from(fileOrFiles instanceof File ? [fileOrFiles] : fileOrFiles || []);
+    const file = picked[0];
     if (!file) return;
-    if (!/\.gguf$/i.test(file.name)) {
+    if (!picked.every((candidate) => /\.gguf$/i.test(candidate.name))) {
       setModelActionMessage("Choose a .gguf model file.");
       return;
     }
     if (IS_STATIC) {
-      loadFileInBrowser(file);
+      loadFileInBrowser(picked);
       return;
     }
 
@@ -1497,6 +1525,12 @@ function App() {
   function sendMessage(value = draft) {
     const content = value.trim();
     if ((!content && attachments.length === 0) || isThinking) return;
+    if (needsBrowserModel) {
+      // No model is running in this tab yet: point at the loader instead of sending into the void.
+      setLoaderNudge(true);
+      window.setTimeout(() => setLoaderNudge(false), 1400);
+      return;
+    }
     const attachmentsToSend = attachments;
     const requestContent = [
       content || "Please review the attached file(s).",
@@ -1564,7 +1598,9 @@ function App() {
           console.error("Local model request failed:", error);
           const messageText = error?.message?.includes("empty response")
             ? "The local model returned no response. Please try again."
-            : `I couldn't get a response from the local model: ${error.message} Check that the llama.cpp server is running.`;
+            : IS_STATIC
+              ? `I couldn't get a response from the in-browser model: ${error.message}`
+              : `I couldn't get a response from the local model: ${error.message} Check that the llama.cpp server is running.`;
           setMessages((current) => [
             ...current,
             {
@@ -1619,7 +1655,9 @@ function App() {
         ...current,
         {
           role: "assistant",
-          content: `I couldn't regenerate the response: ${error.message} Check that the llama.cpp server is running.`,
+          content: IS_STATIC
+            ? `I couldn't regenerate the response: ${error.message}`
+            : `I couldn't regenerate the response: ${error.message} Check that the llama.cpp server is running.`,
           time: now,
           modelName: responseModelName,
         },
@@ -2084,9 +2122,10 @@ function App() {
                     ref={modelUploadInputRef}
                     type="file"
                     accept=".gguf"
+                    multiple={IS_STATIC}
                     hidden
                     onChange={(event) => {
-                      uploadLocalModel(event.target.files?.[0]);
+                      uploadLocalModel(IS_STATIC ? event.target.files : event.target.files?.[0]);
                       event.target.value = "";
                     }}
                   />
@@ -2103,7 +2142,7 @@ function App() {
                     <span className={`online-dot ${modelStatus === "ready" ? "" : "status-dot-muted"}`} />
                     {modelStatus === "ready"
                       ? "Local model ready"
-                      : "Local llama.cpp server required"}
+                      : IS_STATIC ? "No model loaded yet" : "Local llama.cpp server required"}
                   </div>
                   {modelActionMessage && (
                     <div className={`model-action-message ${modelAction ? "" : "model-action-message-done"}`} role={modelAction ? "status" : "alert"}>
@@ -2140,8 +2179,8 @@ function App() {
                     : modelStatus === "checking"
                       ? "Checking model"
                       : modelStatus === "missing"
-                        ? "Model not installed"
-                        : "llama.cpp offline"}
+                        ? (IS_STATIC ? "No model loaded" : "Model not installed")
+                        : (IS_STATIC ? "No model loaded" : "llama.cpp offline")}
                 </span>
               </div>
               <button className="share-button" onClick={() => copyMessage(window.location.href, -1)}>
@@ -2158,7 +2197,7 @@ function App() {
         <div className="chat-scroll">
           <section className={`conversation ${messages.length === 0 ? "conversation-empty" : ""}`}>
             {messages.length === 0 ? (
-              <div className="welcome">
+              <div className={`welcome ${needsBrowserModel ? "welcome-needs-model" : ""}`}>
                 <div className="group-profile">
                   <div className="group-avatar"><Sparkles size={23} strokeWidth={1.8} /></div>
                   <div className="group-profile-copy">
@@ -2171,6 +2210,7 @@ function App() {
                 <div className="eyebrow"><span className="eyebrow-line" /> YOUR AI, IN YOUR CORNER <span className="eyebrow-line" /></div>
                 <h1>Find your next<br />                <em>Favorite idea.</em></h1>
                 <p className="welcome-copy">A place to talk things through, get curious, and make something new.</p>
+                {needsBrowserModel && <div className={loaderNudge ? "model-loader-nudge" : ""}><ModelLoader /></div>}
               </div>
             ) : (
               <div className="messages">
@@ -2320,6 +2360,9 @@ function App() {
         </div>
 
         <footer className="composer-area">
+          {needsBrowserModel && messages.length > 0 && (
+            <div className={loaderNudge ? "model-loader-nudge" : ""}><ModelLoader compact /></div>
+          )}
           <div className="composer">
             <textarea
               ref={textareaRef}

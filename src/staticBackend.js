@@ -1,5 +1,6 @@
 // Browser-only replacement for the Vite dev-server API, used when built with VITE_STATIC=1
 // (GitHub Pages). Cloud chat calls providers directly; local-only features report a clear error.
+import wasmUrl from "@wllama/wllama/esm/wasm/wllama.wasm?url";
 // Static (hosted) mode: set at build time, or detected at runtime on *.github.io so a build made
 // without VITE_STATIC still behaves correctly on GitHub Pages.
 export const IS_STATIC =
@@ -62,36 +63,181 @@ async function cloudChat(payload) {
 }
 
 
-// ---- In-browser GGUF runtime (wllama) for the hosted site -------------------------------
-// The visitor picks a .gguf from their own disk; it is read into browser memory and run with
-// WebAssembly. Nothing is uploaded anywhere. The model is forgotten when the tab is closed.
+// ---- Integrated GGUF loader (wllama / WebAssembly) --------------------------------------
+// Runs any .gguf the visitor provides entirely inside the browser:
+//   * from a file on their disk (pick or drag-and-drop, split shards supported),
+//   * or from a direct link (Hugging Face "resolve" URLs work).
+// Models are kept in the browser's private storage (OPFS) so they survive a page reload and
+// are restored automatically. Nothing is ever uploaded to a server. The WebAssembly runtime is
+// bundled with the site, so no CDN is needed once the page has loaded.
+
 let wllama = null;
 let browserModel = null; // { name, displayName, size, modifiedAt }
 let inferenceQueue = Promise.resolve();
+let activeDownload = null; // AbortController for a running URL download
+
+const STORE_DIR = "aether-models";
+const LAST_MODEL_KEY = "aether-last-browser-model";
+
+// -- loader state (observed by the UI through subscribeLoader / getLoaderState) ------------
+// phase: idle | downloading | loading | ready | error
+let loaderState = { phase: "idle", percent: null, message: "", error: "", model: null, saving: false };
+const listeners = new Set();
+function setLoaderState(patch) {
+  loaderState = { ...loaderState, ...patch };
+  listeners.forEach((listener) => listener());
+}
+export function subscribeLoader(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+export function getLoaderState() {
+  return loaderState;
+}
 
 export function getBrowserModel() {
   return browserModel;
 }
 
-export async function loadBrowserModel(file, onProgress) {
-  const { Wllama } = await import("@wllama/wllama");
-  // The .wasm files are loaded from the CDN at runtime (pinned to the installed version), so the
-  // build never has to resolve a file path inside the package.
-  const CDN = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm";
-  let wasmPaths;
-  try {
-    ({ default: wasmPaths } = await import(/* @vite-ignore */ `${CDN}/wasm-from-cdn.js`));
-  } catch {
-    wasmPaths = { default: `${CDN}/wasm/wllama.wasm` };
+export function browserLoaderSupported() {
+  return typeof WebAssembly === "object" && typeof Worker === "function";
+}
+
+// -- small helpers ---------------------------------------------------------------------------
+const baseName = (name) => String(name).split(/[\\/]/).pop();
+const displayNameOf = (name) => baseName(name).replace(/\.gguf$/i, "");
+const formatBytes = (bytes) =>
+  bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+
+function rememberLastModel(name) {
+  try { name ? localStorage.setItem(LAST_MODEL_KEY, name) : localStorage.removeItem(LAST_MODEL_KEY); } catch { /* storage blocked */ }
+}
+function readLastModel() {
+  try { return localStorage.getItem(LAST_MODEL_KEY) || ""; } catch { return ""; }
+}
+
+async function assertGguf(file) {
+  const magic = new TextDecoder().decode(await file.slice(0, 4).arrayBuffer());
+  if (magic !== "GGUF") {
+    throw new Error(`${file.name} is not a GGUF model file (it doesn't start with the GGUF header).`);
   }
-  await unloadBrowserModel();
-  const instance = new Wllama(wasmPaths);
+}
+
+// -- on-device storage (Origin Private File System) -----------------------------------------
+async function storeRoot() {
+  if (!navigator.storage?.getDirectory) return null;
   try {
-    await instance.loadModel([file], {
+    const root = await navigator.storage.getDirectory();
+    return await root.getDirectoryHandle(STORE_DIR, { create: true });
+  } catch {
+    return null;
+  }
+}
+
+// Each saved model is a folder named after its first file and holds every shard in order.
+const modelFolderName = (name) => encodeURIComponent(baseName(name));
+const shardFileName = (index, name) => `${String(index).padStart(4, "0")}-${encodeURIComponent(baseName(name))}`;
+
+async function pipeToFile(dir, fileName, source, onChunk) {
+  const handle = await dir.getFileHandle(fileName, { create: true });
+  const writable = await handle.createWritable();
+  const counter = new TransformStream({
+    transform(chunk, controller) {
+      onChunk?.(chunk.byteLength);
+      controller.enqueue(chunk);
+    },
+  });
+  try {
+    await source.pipeThrough(counter).pipeTo(writable);
+  } catch (error) {
+    await writable.abort().catch(() => {});
+    throw error;
+  }
+}
+
+async function hasRoomFor(bytes) {
+  try {
+    const { quota, usage } = await navigator.storage.estimate();
+    return !quota || quota - (usage || 0) > bytes * 1.05;
+  } catch {
+    return true;
+  }
+}
+
+async function saveFilesToStore(files) {
+  const root = await storeRoot();
+  if (!root) return false;
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (!(await hasRoomFor(total))) return false;
+  const folder = modelFolderName(files[0].name);
+  await root.removeEntry(folder, { recursive: true }).catch(() => {});
+  const dir = await root.getDirectoryHandle(folder, { create: true });
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      await pipeToFile(dir, shardFileName(index, files[index].name), files[index].stream());
+    }
+  } catch (error) {
+    await root.removeEntry(folder, { recursive: true }).catch(() => {});
+    throw error;
+  }
+  return true;
+}
+
+async function readSavedFiles(name) {
+  const root = await storeRoot();
+  if (!root) return null;
+  let dir;
+  try { dir = await root.getDirectoryHandle(modelFolderName(name)); } catch { return null; }
+  const entries = [];
+  for await (const [entryName, handle] of dir.entries()) {
+    if (handle.kind === "file") entries.push([entryName, handle]);
+  }
+  entries.sort(([a], [b]) => a.localeCompare(b));
+  const files = [];
+  for (const [entryName, handle] of entries) {
+    const file = await handle.getFile();
+    // the stored name is "0000-<encoded name>"; give the File its real name back
+    const realName = decodeURIComponent(entryName.replace(/^\d+-/, ""));
+    files.push(new File([file], realName, { type: file.type }));
+  }
+  return files.length ? files : null;
+}
+
+export async function listSavedModels() {
+  const root = await storeRoot();
+  if (!root) return [];
+  const saved = [];
+  for await (const [folderName, handle] of root.entries()) {
+    if (handle.kind !== "directory") continue;
+    let size = 0;
+    let shards = 0;
+    for await (const [, fileHandle] of handle.entries()) {
+      if (fileHandle.kind !== "file") continue;
+      size += (await fileHandle.getFile()).size;
+      shards += 1;
+    }
+    if (shards) saved.push({ name: decodeURIComponent(folderName), size, shards });
+  }
+  return saved.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function deleteSavedModel(name) {
+  const root = await storeRoot();
+  await root?.removeEntry(modelFolderName(name), { recursive: true }).catch(() => {});
+  if (readLastModel() === name) rememberLastModel("");
+}
+
+// -- loading ---------------------------------------------------------------------------------
+async function startRuntime(blobs, name, size, onProgress) {
+  const { Wllama } = await import("@wllama/wllama");
+  await unloadBrowserModel();
+  const instance = new Wllama({ default: wasmUrl }, { suppressNativeLog: true });
+  try {
+    await instance.loadModel(blobs, {
       n_ctx: 4096, // a smaller context keeps memory use down (the model default can be 32k+)
       n_gpu_layers: 0, // CPU only: WebGPU is faster but crashes on many machines/models
       progressCallback: ({ loaded, total }) => {
-        if (onProgress && total) onProgress(Math.round((loaded / total) * 100));
+        if (total) onProgress?.(Math.round((loaded / total) * 100));
       },
     });
   } catch (error) {
@@ -99,24 +245,187 @@ export async function loadBrowserModel(file, onProgress) {
     throw error;
   }
   wllama = instance;
-  browserModel = {
-    name: file.name,
-    displayName: file.name.replace(/\.gguf$/i, ""),
-    size: file.size,
-    modifiedAt: Date.now(),
-  };
+  browserModel = { name, displayName: displayNameOf(name), size, modifiedAt: Date.now() };
   return browserModel;
+}
+
+function friendlyLoadError(error, fileName) {
+  const text = String(error?.message || error);
+  if (/memory|alloc|abort|crash|RuntimeError/i.test(text)) {
+    return `${fileName} didn't fit in this browser's memory. Try a smaller or more compressed model (about 1B to 3B parameters at Q4, under 2 GB).`;
+  }
+  if (/unsupported|unknown model architecture|invalid|magic/i.test(text)) {
+    return `${fileName} could not be read: ${text}. It may use a model architecture this runtime doesn't support yet.`;
+  }
+  return `Could not load ${fileName}: ${text}`;
+}
+
+/**
+ * Load one .gguf (or all shards of a split model) that the visitor picked.
+ * @param {File|File[]|FileList} input
+ * @param {{ remember?: boolean, fromStore?: boolean }} options
+ */
+export async function loadBrowserModel(input, options = {}) {
+  const { remember = true, fromStore = false } = options;
+  const files = (input instanceof File ? [input] : Array.from(input || []))
+    .filter((file) => /\.gguf$/i.test(file.name))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (!files.length) {
+    const error = new Error("Choose a .gguf model file.");
+    setLoaderState({ phase: "error", error: error.message, percent: null });
+    throw error;
+  }
+  const primary = files[0].name;
+  const size = files.reduce((sum, file) => sum + file.size, 0);
+  try {
+    setLoaderState({ phase: "loading", percent: 0, error: "", message: `Loading ${primary} into the browser…` });
+    await assertGguf(files[0]);
+    await startRuntime(files, primary, size, (percent) =>
+      setLoaderState({ phase: "loading", percent, message: `Loading ${primary} into the browser…` }),
+    );
+  } catch (error) {
+    const message = friendlyLoadError(error, primary);
+    setLoaderState({ phase: "error", percent: null, error: message, message: "", model: null, saving: false });
+    throw new Error(message);
+  }
+  rememberLastModel(primary);
+  setLoaderState({ phase: "ready", percent: null, error: "", message: `${primary} is ready.`, model: browserModel });
+
+  // Keep a copy in on-device storage so the next visit doesn't need the file again.
+  if (remember && !fromStore) {
+    setLoaderState({ saving: true });
+    saveFilesToStore(files)
+      .then((saved) => {
+        if (!saved) rememberLastModel(""); // nothing to restore from next time
+        setLoaderState({ saving: false, message: saved ? `${primary} is ready and saved on this device.` : `${primary} is ready (this browser has no room to save it for next time).` });
+      })
+      .catch(() => {
+        rememberLastModel("");
+        setLoaderState({ saving: false });
+      });
+  }
+  return browserModel;
+}
+
+/** Turn a Hugging Face "blob" page link into the direct download link. */
+export function normalizeModelUrl(raw) {
+  let url;
+  try { url = new URL(String(raw).trim()); } catch { throw new Error("Paste a full link that starts with https://"); }
+  if (url.protocol !== "https:") throw new Error("The link must start with https://");
+  if (/(^|\.)huggingface\.co$/.test(url.hostname)) url.pathname = url.pathname.replace(/^(\/[^/]+\/[^/]+)\/blob\//, "$1/resolve/");
+  if (!/\.gguf$/i.test(url.pathname)) throw new Error("The link must point directly to a .gguf file.");
+  return url;
+}
+
+export function cancelModelDownload() {
+  activeDownload?.abort();
+}
+
+/** Download a .gguf from a direct link, keep it on this device, and load it. */
+export async function loadBrowserModelFromUrl(rawUrl) {
+  const url = normalizeModelUrl(rawUrl);
+  const fileName = decodeURIComponent(url.pathname.split("/").pop());
+  const controller = new AbortController();
+  activeDownload = controller;
+  try {
+    setLoaderState({ phase: "downloading", percent: null, error: "", message: `Connecting to ${url.hostname}…` });
+    let response;
+    try {
+      response = await fetch(url.href, { signal: controller.signal });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw new Error(`Couldn't reach ${url.hostname}. The site may be blocking browser downloads (CORS), or you may be offline. Download the file and drop it here instead.`);
+    }
+    if (!response.ok || !response.body) {
+      const hint = response.status === 401 || response.status === 403
+        ? " This model may need a login or license acceptance. Download it from the website, then drop the file here."
+        : response.status === 404 ? " Check the link." : "";
+      throw new Error(`The server answered HTTP ${response.status}.${hint}`);
+    }
+    const total = Number(response.headers.get("content-length")) || 0;
+    let received = 0;
+    const report = (bytes) => {
+      received += bytes;
+      setLoaderState({
+        phase: "downloading",
+        percent: total ? Math.min(99, Math.round((received / total) * 100)) : null,
+        message: `Downloading ${fileName}… ${formatBytes(received)}${total ? ` of ${formatBytes(total)}` : ""}`,
+      });
+    };
+
+    const root = await storeRoot();
+    let files;
+    if (root && (!total || (await hasRoomFor(total)))) {
+      const folder = modelFolderName(fileName);
+      await root.removeEntry(folder, { recursive: true }).catch(() => {});
+      const dir = await root.getDirectoryHandle(folder, { create: true });
+      try {
+        await pipeToFile(dir, shardFileName(0, fileName), response.body, report);
+      } catch (error) {
+        await root.removeEntry(folder, { recursive: true }).catch(() => {});
+        throw error;
+      }
+      files = await readSavedFiles(fileName);
+    }
+    if (!files) {
+      // No usable on-device storage: hold the download in memory for this session only.
+      const chunks = [];
+      const reader = response.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        report(value.byteLength);
+      }
+      files = [new File(chunks, fileName)];
+    }
+    return await loadBrowserModel(files, { fromStore: Boolean(root), remember: true });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      setLoaderState({ phase: "idle", percent: null, message: "", error: "" });
+      throw new Error("Download cancelled.");
+    }
+    if (loaderState.phase !== "error") setLoaderState({ phase: "error", percent: null, error: error.message, message: "" });
+    throw error;
+  } finally {
+    activeDownload = null;
+  }
+}
+
+/** Load a model that was saved on this device earlier. */
+export async function loadSavedModel(name) {
+  const files = await readSavedFiles(name);
+  if (!files) {
+    const error = new Error(`${name} is no longer saved on this device.`);
+    setLoaderState({ phase: "error", error: error.message, percent: null });
+    throw error;
+  }
+  return loadBrowserModel(files, { fromStore: true });
+}
+
+/** On page load: bring back the model the visitor used last time, if it was saved. */
+export async function restoreLastModel() {
+  const last = readLastModel();
+  if (!last || browserModel || loaderState.phase === "loading" || loaderState.phase === "downloading") return null;
+  const files = await readSavedFiles(last).catch(() => null);
+  if (!files) { rememberLastModel(""); return null; }
+  try {
+    return await loadBrowserModel(files, { fromStore: true });
+  } catch {
+    return null; // the loader state already carries the error for the UI
+  }
 }
 
 export async function unloadBrowserModel() {
   const old = wllama;
   wllama = null;
   browserModel = null;
+  if (loaderState.model) setLoaderState({ model: null, phase: loaderState.phase === "ready" ? "idle" : loaderState.phase });
   if (old) await old.exit().catch(() => {});
 }
 
 function browserChat(payload) {
-  if (!wllama || !browserModel) return Promise.resolve(json(503, { error: "No model is loaded in the browser. Use Upload GGUF model first." }));
+  if (!wllama || !browserModel) return Promise.resolve(json(503, { error: "No model is loaded in the browser. Load a GGUF model first (drop a .gguf file onto the loader, or paste a link to one)." }));
   const run = async () => {
     try {
       const messages = (payload.messages || []).map((m) => ({ role: m.role, content: String(m.content ?? "") }));
@@ -132,6 +441,7 @@ function browserChat(payload) {
       if (/crash|abort|out of memory|memory access/i.test(text)) {
         // The WebAssembly module is dead; drop it so the user knows to load the file again.
         await unloadBrowserModel();
+        setLoaderState({ phase: "error", error: "The in-browser model crashed (usually out of memory). Load it again or pick a smaller model." });
         return json(500, { error: "The in-browser model crashed (usually out of memory). Load the .gguf again, or use a smaller model (about 1B to 3B parameters at Q4, under 2 GB)." });
       }
       return json(500, { error: `The in-browser model failed: ${text}` });
@@ -151,7 +461,7 @@ export function installStaticBackend(force = false) {
   staticBackendInstalled = true;
   const realFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
-    const raw = typeof input === "string" ? input : input.url;
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (raw.startsWith("/__aether/providers/chat")) {
       let payload = {};
       try { payload = JSON.parse(init?.body ?? "{}"); } catch { /* ignore */ }
