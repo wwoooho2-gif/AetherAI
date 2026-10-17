@@ -44,3 +44,4 @@ Fine-tuning downloads its base model from Hugging Face. Those downloads can work
 
 Alternatively, set `HF_TOKEN` in the environment before starting Aether. Never commit or share your token. The trainer also migrates the deprecated `HF_HUB_ENABLE_HF_TRANSFER` setting to `HF_XET_HIGH_PERFORMANCE` when it starts.
 # AetherAI
+# AetherAI
