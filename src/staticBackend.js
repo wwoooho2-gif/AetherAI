@@ -88,6 +88,8 @@ export async function loadBrowserModel(file, onProgress) {
   const instance = new Wllama(wasmPaths);
   try {
     await instance.loadModel([file], {
+      n_ctx: 4096, // a smaller context keeps memory use down (the model default can be 32k+)
+      n_gpu_layers: 0, // CPU only: WebGPU is faster but crashes on many machines/models
       progressCallback: ({ loaded, total }) => {
         if (onProgress && total) onProgress(Math.round((loaded / total) * 100));
       },
@@ -126,7 +128,13 @@ function browserChat(payload) {
       const content = result?.choices?.[0]?.message?.content ?? "";
       return json(200, { choices: [{ message: { role: "assistant", content } }] });
     } catch (error) {
-      return json(500, { error: `The in-browser model failed: ${error?.message || error}` });
+      const text = String(error?.message || error);
+      if (/crash|abort|out of memory|memory access/i.test(text)) {
+        // The WebAssembly module is dead; drop it so the user knows to load the file again.
+        await unloadBrowserModel();
+        return json(500, { error: "The in-browser model crashed (usually out of memory). Load the .gguf again, or use a smaller model (about 1B to 3B parameters at Q4, under 2 GB)." });
+      }
+      return json(500, { error: `The in-browser model failed: ${text}` });
     }
   };
   // one request at a time: the WebAssembly runtime has a single sequence
