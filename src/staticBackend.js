@@ -1,6 +1,10 @@
 // Browser-only replacement for the Vite dev-server API, used when built with VITE_STATIC=1
 // (GitHub Pages). Cloud chat calls providers directly; local-only features report a clear error.
-export const IS_STATIC = import.meta.env.VITE_STATIC === "1";
+// Static (hosted) mode: set at build time, or detected at runtime on *.github.io so a build made
+// without VITE_STATIC still behaves correctly on GitHub Pages.
+export const IS_STATIC =
+  import.meta.env.VITE_STATIC === "1" ||
+  (typeof window !== "undefined" && /(^|\.)github\.io$/.test(window.location.hostname));
 
 const json = (status, body) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -131,8 +135,12 @@ function browserChat(payload) {
   return next;
 }
 
-export function installStaticBackend() {
-  if (!IS_STATIC) return;
+let staticBackendInstalled = false;
+
+export function installStaticBackend(force = false) {
+  if (!IS_STATIC && !force) return;
+  if (staticBackendInstalled) return;
+  staticBackendInstalled = true;
   const realFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
     const raw = typeof input === "string" ? input : input.url;
