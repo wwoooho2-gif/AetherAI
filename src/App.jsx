@@ -40,9 +40,11 @@ import {
 import { HOSTED_MAX_MB, matchModelRequest, modelListText } from "./lib/models.js";
 import { IS_STATIC, IS_MOBILE, BROWSER_CONTEXT, installStaticBackend, loadBrowserModel, loadBrowserModelFromUrl, getLoaderState, subscribeLoader, restoreLastModel } from "./staticBackend.js";
 import ModelLoader from "./ModelLoader.jsx";
-import { createZip } from "./lib/zip.js";
+import { downloadDataUrl, downloadArtifact, downloadZip } from "./lib/download.js";
+import { inferFilename } from "./lib/filenames.js";
+import MessageItem, { SummaryNote } from "./MessageItem.jsx";
 import { applyPatchBlocks, EDIT_PROMPT, filesFromDrop, parsePatchBlocks, readAttachments } from "./lib/files.js";
-import { compactHistory, estimateTokens, headTail, packFiles } from "./lib/context.js";
+import { buildCompactRequest, cleanSummary, compactHistory, compactionDue, contextFill, estimateTokens, fallbackSummary, headTail, isSummary, lastSummaryIndex, liveMessages, makeSummaryMessage, packFiles, planCompaction } from "./lib/context.js";
 import { extractUrls, generateImage, searchImages, webSearch, formatResultsForPrompt } from "./lib/web.js";
 import { parseToolCalls, runToolCall, stripToolCalls, TOOL_PROMPT } from "./lib/tools.js";
 import { renderRich } from "./lib/markdown.jsx";
@@ -69,39 +71,28 @@ const responseStyleValues = [
   "custom",
 ];
 const initialMessages = [];
+// Short by default so a reply is never a wall of text; the Long pill switches to the detailed version.
+const BREVITY_PROMPT = "Keep replies short: answer first, in 1-4 sentences or a few bullets. No preamble, no restating the question, no closing recap or follow-up offers, and no background unless asked. New code files stay complete (no placeholders) but keep the prose around them to a line or two; for edits give only the changed part. If a full answer would be long, give the key part and say you can continue.";
+const DETAILED_PROMPT = "The user wants a detailed answer: be thorough but organized, with short sections or bullets, and no filler.";
 const LAST_CHAT_KEY = "aether.lastChat.v1";
-const fileExtensions = {
-  bash: "sh",
-  c: "c",
-  cpp: "cpp",
-  css: "css",
-  html: "html",
-  java: "java",
-  javascript: "js",
-  json: "json",
-  jsx: "jsx",
-  markdown: "md",
-  md: "md",
-  python: "py",
-  py: "py",
-  shell: "sh",
-  sh: "sh",
-  sql: "sql",
-  svg: "svg",
-  text: "txt",
-  ts: "ts",
-  tsx: "tsx",
-  typescript: "ts",
-  xml: "xml",
-  yaml: "yml",
-  yml: "yml",
-};
+
+// Replies never change once written, so each message is parsed once, not on every render.
+const parsedCache = new WeakMap();
+function parseMessage(message) {
+  if (message.role !== "assistant" || isSummary(message)) return null;
+  let parsed = parsedCache.get(message);
+  if (!parsed) {
+    parsed = parseCodeArtifacts(message.content);
+    parsedCache.set(message, parsed);
+  }
+  return parsed;
+}
 
 function parseCodeArtifacts(content) {
   const segments = [];
   const fencePattern = /```([^\n`]*)\r?\n([\s\S]*?)```/g;
   let lastIndex = 0;
-  let artifactIndex = 0;
+  const used = new Set(); // names already taken in this reply, so two unlabeled files never collide
   let match;
 
   while ((match = fencePattern.exec(content)) !== null) {
@@ -112,8 +103,9 @@ function parseCodeArtifacts(content) {
     const info = match[1].trim();
     const [language = "", ...infoParts] = info.split(/\s+/);
     const filenameMatch = infoParts.join(" ").match(/(?:^|\s)(?:filename=)?["']?([^"'\s]+\.[a-zA-Z0-9]+)["']?/);
-    const extension = fileExtensions[language.toLowerCase()] || "txt";
-    const filename = filenameMatch?.[1] || `generated-${artifactIndex + 1}.${extension}`;
+    // Unlabeled blocks get a name that fits what they are (index.html, main.py, Calculator.java…), never "generated-1".
+    const filename = filenameMatch?.[1] || inferFilename({ language, content: match[2], before: content.slice(lastIndex, match.index), used });
+    used.add(filename.replace(/\\/g, "/").replace(/^\.?\//, "").toLowerCase());
     segments.push({
       type: "artifact",
       named: Boolean(filenameMatch),
@@ -122,7 +114,6 @@ function parseCodeArtifacts(content) {
       language: language || "text",
       content: match[2].replace(/\n$/, ""),
     });
-    artifactIndex += 1;
     lastIndex = fencePattern.lastIndex;
   }
 
@@ -133,30 +124,6 @@ function parseCodeArtifacts(content) {
 }
 
 const renderInlineMarkdown = renderRich;
-
-function downloadArtifact(filename, content) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-async function downloadZip(files, filename = "aether-files.zip") {
-  const blob = await createZip(files.filter((file) => !file.readOnly).map(({ name, content }) => ({ name, content })));
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
-}
 
 const nameList = (names, max = 6) =>
   names.length <= max ? names.join(", ") : `${names.slice(0, max).join(", ")} +${names.length - max} more`;
@@ -444,7 +411,7 @@ function FineTuneWorkspace({
         <header className="fine-tune-heading">
           <span className="fine-tune-eyebrow"><BrainCircuit size={15} /> MODEL WORKSHOP</span>
           <h1>Teach a model<br /><em>how you want it to respond.</em></h1>
-          <p>Write examples of the answers you want. Aether fine-tunes a new model locally, then keeps only the newest GGUF in your model folder.</p>
+          <p>Write examples of the answers you want. Aether fine-tunes a new model locally and adds it next to your other models. Nothing is removed unless you remove it.</p>
         </header>
 
         <div className={`fine-tune-status ${status.ready ? "fine-tune-status-ready" : "fine-tune-status-setup"}`} role="status">
@@ -923,6 +890,7 @@ function App() {
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [responseFeedback, setResponseFeedback] = useState({});
   const [openMessageMenuIndex, setOpenMessageMenuIndex] = useState(null);
+  const [showEarlier, setShowEarlier] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [codingPreferences, setCodingPreferences] = useState("");
   const [codingPreferencesDraft, setCodingPreferencesDraft] = useState("");
@@ -979,6 +947,7 @@ function App() {
     setDraft("");
     setAttachmentError("");
     setOpenMessageMenuIndex(null);
+    setShowEarlier(false);
   }
 
   // On load: show the saved list and reopen the chat you were last in.
@@ -1070,12 +1039,27 @@ function App() {
       setStorageNote(`Couldn’t delete chats: ${error.message}`);
     }
   }
-  const parsedMessages = useMemo(
-    () => messages.map((message) => (
-      message.role === "assistant" ? parseCodeArtifacts(message.content) : null
-    )),
-    [messages],
-  );
+  const parsedMessages = useMemo(() => messages.map(parseMessage), [messages]);
+  // How full the history part of the prompt is; drives the "Context" chip and automatic compaction.
+  const contextInfo = useMemo(() => {
+    const count = liveMessages(messages).messages.length;
+    return { count, pct: Math.min(100, Math.round(contextFill(messages, historyRoom(providerConfig)) * 100)) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, providerConfig.provider, longResponseEnabled]);
+  const lastFinishRef = useRef("");
+  // Stable handlers for the memoized message list, so earlier messages don't re-render on every keystroke.
+  const actionsRef = useRef({});
+  actionsRef.current = { copyMessage, speaker, toggleResponseFeedback, regenerateResponse, setPreviewArtifact };
+  const act = useMemo(() => ({
+    copy: (content, index) => actionsRef.current.copyMessage(content, index),
+    speak: (index, content) => actionsRef.current.speaker.speak(index, content),
+    stop: () => actionsRef.current.speaker.stop(),
+    rate: (index, value) => actionsRef.current.toggleResponseFeedback(index, value),
+    regenerate: (index) => actionsRef.current.regenerateResponse(index),
+    preview: (artifact) => actionsRef.current.setPreviewArtifact(artifact),
+    toggleMenu: (index) => setOpenMessageMenuIndex((current) => (current === index ? null : index)),
+    closeMenu: () => setOpenMessageMenuIndex(null),
+  }), []);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const trainingImportRef = useRef(null);
@@ -1506,13 +1490,14 @@ function App() {
     setAttachmentError("");
     setResponseFeedback({});
     setOpenMessageMenuIndex(null);
+    setShowEarlier(false);
     setMobileSidebarOpen(false);
     textareaRef.current?.focus();
   }
 
-  function createSystemMessage(hasFiles = false, webOn = false) {
+  function createSystemMessage(hasFiles = false, webOn = false, detailed = false) {
     const toneInstructions = {
-      default: "Use a balanced, natural voice: clear, friendly, and direct, with enough detail to answer fully.",
+      default: "Use a natural voice: clear, friendly, and direct. Get to the point.",
       professional: "Sound polished and professional. Use precise language, complete sentences, and minimal slang.",
       casual: "Sound relaxed and conversational. Use contractions and plain language; avoid unnecessary formality.",
       friendly: "Sound warm, approachable, and encouraging. Be personable without overdoing praise.",
@@ -1530,8 +1515,9 @@ function App() {
     return {
       role: "system",
       content: [
-        "You are Aether, a direct, practical assistant for programming and general tasks. Answer benign requests fully; if part of a request is off-limits, say so briefly and help with the rest. Ask one short question only if key details are missing. Write code in any language the user names, including niche, obscure or custom ones; match the language of attached files by default, follow any syntax docs or examples the user gives, and say so briefly if you are unsure of a language rather than guessing silently. For new code, give complete usable files in fenced blocks labelled with language and filename (for example ```html filename=\"index.html\"), put run steps outside the block, and leave no placeholders.",
+        "You are Aether, a direct, practical assistant for programming and general tasks. Answer benign requests fully; if part of a request is off-limits, say so briefly and help with the rest. Ask one short question only if key details are missing. Write code in any language the user names, including niche, obscure or custom ones; match the language of attached files by default, follow any syntax docs or examples the user gives, and say so briefly if you are unsure of a language rather than guessing silently. For new code, give complete usable files in fenced blocks labelled with language and filename (for example ```html filename=\"index.html\"), put run steps outside the block, and leave no placeholders. Always give every file a real, descriptive filename that says what it is (index.html, server.py, Calculator.java), never a generic one like generated or file1.",
         `Style: ${responseStyle}`,
+        detailed ? DETAILED_PROMPT : BREVITY_PROMPT,
         hasFiles ? EDIT_PROMPT : "",
         webOn ? TOOL_PROMPT : "",
         codingPreferences ? `User coding preferences (lower priority than safety):\n${codingPreferences}` : "",
@@ -1541,7 +1527,8 @@ function App() {
     };
   }
 
-  async function requestAssistantCompletion(requestMessages, loadedModelId, provider = providerConfig) {
+  async function requestAssistantCompletion(requestMessages, loadedModelId, provider = providerConfig, opts = {}) {
+    lastFinishRef.current = "";
     if (provider.provider !== "local") {
       const response = await fetch("/__aether/providers/chat", {
         method: "POST",
@@ -1569,8 +1556,8 @@ function App() {
           body: JSON.stringify({
             model: loadedModelId || selectedModel.fileName,
             messages: requestMessages,
-            reasoning_effort: thinkModeEnabled ? "high" : "low",
-            ...(longResponseEnabled ? { max_tokens: IS_STATIC ? 2048 : 4096 } : {}),
+            reasoning_effort: opts.effort || (thinkModeEnabled ? "high" : "low"),
+            max_tokens: opts.maxTokens || answerTokenCap(),
             stream: false,
           }),
         });
@@ -1601,6 +1588,7 @@ function App() {
       }
 
       const responseContent = data.choices?.[0]?.message?.content;
+      lastFinishRef.current = data.choices?.[0]?.finish_reason || "";
       if (responseContent && String(responseContent).trim()) return responseContent;
       if (attempt === 1) throw new Error("llama.cpp returned an empty response.");
     }
@@ -1610,12 +1598,66 @@ function App() {
 
   // ---- context budget ----------------------------------------------------------------------------
   // Prompt size is what makes local models slow (prefill), so every turn is packed into a budget.
+  // Output cap per reply. Normal replies stay short; Long and Think get room (reasoning tokens count too).
+  function answerTokenCap() {
+    if (longResponseEnabled || thinkModeEnabled) return IS_STATIC ? 2048 : 4096;
+    return IS_STATIC ? (IS_MOBILE ? 768 : 1024) : 1536;
+  }
+
   function contextPlan(provider) {
     const cloud = provider.provider !== "local";
     const contextTokens = cloud ? 12_000 : IS_STATIC ? BROWSER_CONTEXT : 8192;
-    const wanted = longResponseEnabled ? (IS_STATIC ? Math.floor(BROWSER_CONTEXT / 2) : 4096) : IS_STATIC && IS_MOBILE ? 768 : 1024;
+    const wanted = longResponseEnabled ? (IS_STATIC ? Math.floor(BROWSER_CONTEXT / 2) : 4096) : IS_STATIC ? (IS_MOBILE ? 768 : 1024) : 1536;
     const reservedForAnswer = Math.min(wanted, Math.floor(contextTokens / 2));
     return { promptBudget: Math.max(1200, contextTokens - reservedForAnswer - 150) };
+  }
+
+  // The share of the prompt that chat history may use (the rest goes to the system prompt, files and web text).
+  function historyRoom(provider) {
+    return Math.max(400, Math.floor((contextPlan(provider).promptBudget - 800) * 0.5));
+  }
+
+  // Replace everything older than `keepRecent` messages with one short summary marker. The model writes the
+  // summary; if it is busy, offline or returns junk, a quick extractive recap is used instead.
+  async function compactMessages(list, { focus = "", keepRecent = 0, provider, loadedModelId, now, heuristicOnly = false }) {
+    const plan = planCompaction(list, keepRecent);
+    if (!plan) return null;
+    let text = "";
+    if (!heuristicOnly) {
+      try {
+        const reply = await requestAssistantCompletion(buildCompactRequest(plan.older, plan.prior, focus), loadedModelId, provider, { maxTokens: 450, effort: "low" });
+        text = cleanSummary(reply);
+      } catch (error) {
+        console.warn("Model summary failed, using a quick recap instead:", error);
+      }
+    }
+    if (text.length < 40) text = fallbackSummary(plan.older, plan.prior);
+    setShowEarlier(false);
+    return [...list.slice(0, plan.cut), makeSummaryMessage(text, plan.older.length, now), ...list.slice(plan.cut)];
+  }
+
+  // /compact [what to remember]  (also the Context chip): summarise the whole chat so far.
+  async function runCompact(focus = "", now = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })) {
+    if (isThinking) return;
+    setDraft("");
+    setIsThinking(true);
+    setThinkingModelName("Aether");
+    setToolStatus("Compacting the conversation…");
+    try {
+      const compacted = await compactMessages(messages, {
+        focus,
+        keepRecent: 0,
+        provider: providerConfig,
+        loadedModelId: getAvailableModelId(selectedModel, availableModelIds),
+        now,
+      });
+      if (compacted) setMessages(compacted);
+      else setMessages((current) => [...current, { role: "assistant", content: "Nothing to compact yet. The chat is still short.", time: now, modelName: "Aether" }]);
+    } finally {
+      setToolStatus("");
+      setIsThinking(false);
+      setThinkingModelName("");
+    }
   }
 
   // Apply the model's ```edit blocks (and whole-file rewrites of attached files) to the project files.
@@ -1659,7 +1701,7 @@ function App() {
   async function produceReply({ history, files, useWeb, provider, loadedModelId }) {
     const question = history[history.length - 1].requestContent || "";
     const toolContext = { isStatic: IS_STATIC, openaiKey: provider.provider === "openai" ? provider.apiKey : "" };
-    const system = createSystemMessage(files.length > 0, useWeb);
+    const system = createSystemMessage(files.length > 0, useWeb, longResponseEnabled);
     const extras = [];
     const sources = [];
     const images = [];
@@ -1738,6 +1780,7 @@ function App() {
       text = await requestAssistantCompletion(requestMessages, loadedModelId, provider);
     }
     text = stripToolCalls(text);
+    if (lastFinishRef.current === "length") notes.push("Reply was cut short. Say “continue”, or turn on Long.");
     if (!text && images.length) text = "Here you go.";
     const patched = applyEditsFromReply(text, files);
     return { text, images, sources, notes, files: patched.files, edits: patched.edits };
@@ -1770,7 +1813,7 @@ function App() {
     const answer = (content, extra = {}) =>
       setMessages((current) => [...current, { role: "assistant", content, time: now, modelName: "Aether", ...extra }]);
     if (command === "zip") {
-      const lastReply = [...messages].reverse().find((message) => message.role === "assistant");
+      const lastReply = [...messages].reverse().find((message) => message.role === "assistant" && !isSummary(message));
       const artifacts = lastReply ? parseCodeArtifacts(lastReply.content).filter((segment) => segment.type === "artifact" && segment.language !== "edit") : [];
       const known = new Set(attachments.map((file) => file.name));
       const files = [
@@ -1834,6 +1877,11 @@ function App() {
     if ((!content && unsent.length === 0) || isThinking) return;
     speaker.stop();
     const now = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const compactCommand = content.match(/^\/compact\b\s*([\s\S]*)$/i);
+    if (compactCommand) {
+      runCompact(compactCommand[1].trim(), now);
+      return;
+    }
     const command = content.match(/^\/(image|draw|photos?|zip)\b\s*([\s\S]*)$/i);
     if (command) {
       runCommand(command[1].toLowerCase() === "draw" ? "image" : command[1].toLowerCase(), command[2].trim(), content, now);
@@ -1856,6 +1904,7 @@ function App() {
       role: "user",
       content: [content, ...newNames.slice(0, 8).map((name) => `📎 ${name}`), newNames.length > 8 ? `📎 +${newNames.length - 8} more files` : ""].filter(Boolean).join("\n"),
       requestContent: question,
+      images: unsent.filter((file) => file.dataUrl).slice(0, 8).map((file) => ({ name: file.name, dataUrl: file.dataUrl })),
       // older turns only keep the question and the file names; file text is re-packed fresh each turn
       compactContent: newNames.length ? `${question}\n[attached: ${nameList(newNames)}]` : question,
       time: now,
@@ -1863,7 +1912,7 @@ function App() {
     const filesBefore = attachments;
     const activeProvider = { ...providerConfig };
     const modelName = responseNameFor(activeProvider);
-    const history = [...messages, userMessage];
+    let history = [...messages, userMessage];
     setMessages(history);
     setDraft("");
     setAttachments((current) => current.map((file) => ({ ...file, sent: true })));
@@ -1871,13 +1920,20 @@ function App() {
     setIsThinking(true);
     setThinkingModelName(modelName);
 
-    produceReply({
-      history,
-      files: filesBefore,
-      useWeb: searchHintEnabled,
-      provider: activeProvider,
-      loadedModelId: getAvailableModelId(selectedModel, availableModelIds),
-    })
+    const loadedModelId = getAvailableModelId(selectedModel, availableModelIds);
+    (async () => {
+      // Long chat: run /compact automatically first, so nothing important silently falls out of the prompt.
+      if (compactionDue(messages, historyRoom(activeProvider))) {
+        setToolStatus("Auto-compacting the conversation…");
+        // Same call as typing /compact: the model summarizes everything so far.
+        const compacted = await compactMessages(messages, { keepRecent: 0, provider: activeProvider, loadedModelId, now });
+        if (compacted) {
+          history = [...compacted, userMessage];
+          setMessages(history);
+        }
+      }
+      return produceReply({ history, files: filesBefore, useWeb: searchHintEnabled, provider: activeProvider, loadedModelId });
+    })()
       .then((result) => {
         setMessages((current) => [...current, replyMessage(result, now, modelName, filesBefore, { webUsed: searchHintEnabled })]);
         if (voiceSettingsRef.current.autoRead) speaker.speak(history.length, result.text);
@@ -1964,7 +2020,7 @@ function App() {
       });
     }
     setAttachmentError(
-      rejected.length ? `Skipped: ${nameList(rejected, 4)}. Images/audio/video/archives, text files over 2 MB and junk folders (node_modules, .git…) are ignored. DLLs, EXEs, PDFs and Office files are read as summaries.` : "",
+      rejected.length ? `Skipped: ${nameList(rejected, 4)}. Audio, video, archives, text files over 2 MB and junk folders (node_modules, .git…) are ignored. DLLs, EXEs, PDFs and Office files are read as summaries.` : "",
     );
   }
 
@@ -1974,6 +2030,31 @@ function App() {
     if (files.length) await ingestFiles(files);
   }
 
+  // Give pasted screenshots a real name (browsers call every one "image.png").
+  function nameClipboardFiles(files) {
+    const stamp = Date.now();
+    return files.map((file, i) => (/^image\.\w+$/i.test(file.name) || !file.name
+      ? new File([file], `screenshot-${stamp}-${i + 1}.${(file.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: file.type })
+      : file));
+  }
+
+  // Ctrl/Cmd+V anywhere in the chat (not just inside the text box) attaches copied screenshots and files.
+  async function handlePaste(event) {
+    if (activeView !== "chat") return;
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (!files.length) return; // plain text paste: leave it alone
+    event.preventDefault();
+    await ingestFiles(nameClipboardFiles(files));
+  }
+
+  const pasteHandlerRef = useRef(handlePaste);
+  pasteHandlerRef.current = handlePaste;
+  useEffect(() => {
+    const listener = (event) => pasteHandlerRef.current(event);
+    document.addEventListener("paste", listener);
+    return () => document.removeEventListener("paste", listener);
+  }, []);
+
   async function handleDrop(event) {
     event.preventDefault();
     setDragActive(false);
@@ -1982,6 +2063,10 @@ function App() {
   }
 
   function previewAttachment(file) {
+    if (file.dataUrl) {
+      setPreviewArtifact({ type: "image", filename: file.name.split("/").pop(), path: file.name, image: file.dataUrl, content: "" });
+      return;
+    }
     const artifacts = attachments.map((item) => ({
       type: "artifact",
       filename: item.name.split("/").pop(),
@@ -2253,6 +2338,10 @@ function App() {
     }));
   }
 
+  // Only the newest messages are drawn; after a compaction, the part before the summary folds away.
+  const summaryAt = lastSummaryIndex(messages);
+  const windowStart = showEarlier ? 0 : Math.max(summaryAt, messages.length - 40, 0);
+
   function handleComposerKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -2276,7 +2365,7 @@ function App() {
       {dragActive && (
         <div className="drop-overlay" aria-hidden="true">
           <FileUp size={26} />
-          <strong>Drop files, folders or a .zip</strong>
+          <strong>Drop files, images, folders or a .zip</strong>
           <span>Any language · Aether reads them and can edit them</span>
         </div>
       )}
@@ -2554,215 +2643,31 @@ function App() {
             ) : (
               <div className="messages">
                 <div className="conversation-date"><span /> TODAY IN THE GROUP <span /></div>
-                {messages.map((message, index) => (
-                  <article key={`${index}-${message.role}`} className={`message message-${message.role}`}>
-                    {message.role === "assistant" ? (
-                      <div className="message-avatar"><Sparkles size={15} /></div>
-                    ) : (
-                      <div className="avatar user-avatar">A</div>
-                    )}
-                    <div className="message-body">
-                      <div className="message-meta">
-                        <strong>{message.role === "assistant" ? message.modelName || "Aether" : "You"}</strong>
-                        <span>{message.time}</span>
-                      </div>
-                      {message.role === "assistant"
-                        ? parsedMessages[index].map((segment, segmentIndex, segments) =>
-                            segment.type === "text" ? (
-                              segment.content.trim() && (
-                                <p key={`text-${segmentIndex}`}>{renderInlineMarkdown(segment.content)}</p>
-                              )
-                            ) : (
-                              <section className="artifact-card" key={`artifact-${segmentIndex}`}>
-                                <header className="artifact-header">
-                                  <div className="artifact-file">
-                                    <FileText size={14} />
-                                    <strong>{segment.filename}</strong>
-                                    <span>{segment.language}</span>
-                                  </div>
-                                  <div className="artifact-actions">
-                                    {segment.language.toLowerCase() === "edit" ? (() => {
-                                      const result = message.edits?.find((edit) => edit.name === segment.path || edit.name.endsWith(`/${segment.path}`));
-                                      const edited = message.editedFiles?.find((file) => result && file.name === result.name);
-                                      return (
-                                        <>
-                                          {result && (
-                                            <span className={result.failed.length ? "edit-status edit-status-warn" : "edit-status"}>
-                                              {result.applied}/{result.total} applied
-                                            </span>
-                                          )}
-                                          {edited && (
-                                            <button aria-label={`Download edited ${edited.name}`} onClick={() => downloadArtifact(edited.name.split("/").pop(), edited.content)}>
-                                              <Download size={14} />
-                                              <span>Edited file</span>
-                                            </button>
-                                          )}
-                                        </>
-                                      );
-                                    })() : (
-                                      <>
-                                    <button
-                                      aria-label={`Preview ${segment.filename}`}
-                                      onClick={() =>
-                                        setPreviewArtifact({
-                                          ...segment,
-                                          artifacts: segments.filter((candidate) => candidate.type === "artifact"),
-                                        })
-                                      }
-                                    >
-                                      <Eye size={14} />
-                                      <span>Preview</span>
-                                    </button>
-                                    <button
-                                      aria-label={`Download ${segment.filename}`}
-                                      onClick={() => downloadArtifact(segment.filename, segment.content)}
-                                    >
-                                      <Download size={14} />
-                                      <span>Download</span>
-                                    </button>
-                                  
-                                      </>
-                                    )}
-                                  </div>
-                                </header>
-                                <pre className="artifact-code"><code>{segment.content}</code></pre>
-                              </section>
-                            ),
-                          )
-                        : <p>{renderInlineMarkdown(message.content)}</p>}
-                      {message.edits?.some((edit) => edit.failed.length > 0) && (
-                        <div className="edit-problems" role="note">
-                          {message.edits.filter((edit) => edit.failed.length > 0).map((edit) => (
-                            <p key={edit.name}><strong>{edit.name}:</strong> {edit.failed.join(" · ")} Ask me to retry that change.</p>
-                          ))}
-                        </div>
-                      )}
-                      {message.images?.length > 0 && (
-                        <div className="message-images">
-                          {message.images.map((image) => (
-                            <figure key={image.url}>
-                              <img src={image.url} alt={image.alt} loading="lazy" referrerPolicy="no-referrer" />
-                              <figcaption>
-                                {image.alt}
-                                {image.license ? ` · ${image.license}` : ""}
-                                {/^https:/.test(image.credit || "") && <> · <a href={image.credit} target="_blank" rel="noopener noreferrer nofollow">source <ExternalLink size={10} /></a></>}
-                              </figcaption>
-                            </figure>
-                          ))}
-                        </div>
-                      )}
-                      {message.sources?.length > 0 && (
-                        <div className="message-sources">
-                          <span>Sources</span>
-                          {message.sources.slice(0, 6).map((source, sourceIndex) => (
-                            <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noopener noreferrer nofollow" title={source.title}>
-                              {source.source}: {source.title}
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                      {message.notes?.length > 0 && <p className="message-notes">{message.notes.join(" · ")}</p>}
-                      {message.role === "assistant" && (
-                        <div className="message-actions">
-                          <button
-                            type="button"
-                            aria-label={speech.id === index ? "Stop reading aloud" : "Read aloud"}
-                            title={speech.id === index ? "Stop reading" : "Read this reply out loud"}
-                            className={`listen-button${speech.id === index ? " is-selected" : ""}`}
-                            onClick={() => (speech.id === index ? speaker.stop() : speaker.speak(index, message.content))}
-                          >
-                            {speech.id === index ? <Square size={13} /> : <Volume2 size={14} />}
-                            <span>{speech.id === index ? (speech.state === "loading" ? "Loading… stop" : "Stop") : "Listen"}</span>
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={copiedIndex === index ? "Response copied" : "Copy response"}
-                            title={copiedIndex === index ? "Copied" : "Copy response"}
-                            onClick={() => copyMessage(message.content, index)}
-                          >
-                            {copiedIndex === index ? <Check size={14} /> : <Copy size={14} />}
-                          </button>
-                          <button
-                            type="button"
-                            aria-label="Good response"
-                            aria-pressed={responseFeedback[index] === "up"}
-                            title="Good response"
-                            className={responseFeedback[index] === "up" ? "is-selected" : ""}
-                            onClick={() => toggleResponseFeedback(index, "up")}
-                          >
-                            <ThumbsUp size={14} />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label="Bad response"
-                            aria-pressed={responseFeedback[index] === "down"}
-                            title="Bad response"
-                            className={responseFeedback[index] === "down" ? "is-selected" : ""}
-                            onClick={() => toggleResponseFeedback(index, "down")}
-                          >
-                            <ThumbsDown size={14} />
-                          </button>
-                          {(parsedMessages[index]?.some((segment) => segment.type === "artifact") || message.editedFiles?.length > 0) && (
-                            <button
-                              type="button"
-                              aria-label="Download all files in this reply as a zip"
-                              title="Download all files in this reply as .zip"
-                              onClick={() => {
-                                const files = new Map();
-                                parsedMessages[index].filter((segment) => segment.type === "artifact" && segment.language.toLowerCase() !== "edit")
-                                  .forEach((segment) => files.set(segment.path, { name: segment.path, content: segment.content }));
-                                (message.editedFiles || []).forEach((file) => files.set(file.name, file));
-                                downloadZip([...files.values()], "aether-reply.zip");
-                              }}
-                            >
-                              <FileArchive size={14} />
-                            </button>
-                          )}
-                          <div
-                            className="message-more"
-                            onKeyDown={(event) => {
-                              if (event.key === "Escape") setOpenMessageMenuIndex(null);
-                            }}
-                          >
-                            <button
-                              type="button"
-                              aria-label="More response options"
-                              aria-expanded={openMessageMenuIndex === index}
-                              aria-controls={`message-menu-${index}`}
-                              title="More options"
-                              onClick={() => setOpenMessageMenuIndex(
-                                openMessageMenuIndex === index ? null : index,
-                              )}
-                            >
-                              <Ellipsis size={15} />
-                            </button>
-                            {openMessageMenuIndex === index && (
-                              <div className="message-menu" id={`message-menu-${index}`} role="group" aria-label="Response options">
-                                <button
-                                  type="button"
-                                  onClick={() => copyMessage(message.content, index)}
-                                >
-                                  <Copy size={13} />
-                                  <span>Copy response</span>
-                                </button>
-                                {index === messages.length - 1 && (
-                                  <button
-                                    type="button"
-                                    disabled={isThinking}
-                                    onClick={() => regenerateResponse(index)}
-                                  >
-                                    <RotateCw size={13} />
-                                    <span>Regenerate response</span>
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </article>
-                ))}
+                {windowStart > 0 && (
+                  <button type="button" className="show-earlier" onClick={() => setShowEarlier(true)}>
+                    Show {windowStart} earlier message{windowStart === 1 ? "" : "s"}
+                  </button>
+                )}
+                {messages.slice(windowStart).map((message, offset) => {
+                  const index = windowStart + offset;
+                  if (isSummary(message)) return <SummaryNote key={`${index}-summary`} message={message} />;
+                  const isLast = index === messages.length - 1;
+                  return (
+                    <MessageItem
+                      key={`${index}-${message.role}`}
+                      message={message}
+                      segments={parsedMessages[index]}
+                      index={index}
+                      isLast={isLast}
+                      busy={isLast && isThinking}
+                      speechState={speech.id === index ? speech.state || "playing" : null}
+                      copied={copiedIndex === index}
+                      feedback={responseFeedback[index] ?? null}
+                      menuOpen={openMessageMenuIndex === index}
+                      act={act}
+                    />
+                  );
+                })}
                 {isThinking && (
                   <article className="message message-assistant">
                     <div className="message-avatar"><Sparkles size={15} /></div>
@@ -2835,8 +2740,13 @@ function App() {
               <div className="attachment-list" aria-label="Project files">
                 {attachments.slice(0, 12).map((attachment, index) => (
                   <div className={`attachment-chip${attachment.edited ? " attachment-edited" : ""}`} key={`${attachment.name}-${index}`}>
-                    <FileText size={13} />
+                    {attachment.dataUrl ? (
+                      <button className="attachment-thumb" aria-label={`View ${attachment.name}`} title={`View ${attachment.name}`} onClick={() => previewAttachment(attachment)}>
+                        <img src={attachment.dataUrl} alt="" />
+                      </button>
+                    ) : <FileText size={13} />}
                     <span title={attachment.name}>{attachment.name.split("/").pop()}{attachment.edited ? " ✎" : ""}</span>
+                    {attachment.width > 0 && <em className="attachment-dims">{attachment.width}×{attachment.height}</em>}
                     {/\.html?$/i.test(attachment.name) && (
                       <button aria-label={`Preview ${attachment.name}`} title="Preview page" onClick={() => previewAttachment(attachment)}>
                         <Eye size={13} />
@@ -2914,11 +2824,22 @@ function App() {
                 <button
                   className={`tool-pill long-response ${longResponseEnabled ? "tool-pill-active" : ""}`}
                   aria-pressed={longResponseEnabled}
-                  title="Allow up to 4096 output tokens for the next reply"
+                  title="Allow longer, more detailed replies (up to 4096 tokens)"
                   onClick={() => setLongResponseEnabled((enabled) => !enabled)}
                 >
                   <AlignLeft size={14} /><span>Long</span>
                 </button>
+                {contextInfo.count >= 4 && (
+                  <button
+                    className={`tool-pill ctx-pill ${contextInfo.pct >= 60 ? "ctx-high" : ""}`}
+                    disabled={isThinking}
+                    title="How full the chat memory is. Click to summarize older messages (same as /compact). Aether also does this automatically when the chat gets long."
+                    onClick={() => runCompact()}
+                  >
+                    <span className="ctx-meter" aria-hidden="true"><i style={{ width: `${contextInfo.pct}%` }} /></span>
+                    <span>Context {contextInfo.pct}%</span>
+                  </button>
+                )}
                 <button
                   className={`tool-pill ${voiceSettings.autoRead || voicePanelOpen ? "tool-pill-active" : ""}`}
                   aria-pressed={voicePanelOpen}
@@ -3132,9 +3053,9 @@ function App() {
             onClick={(event) => event.stopPropagation()}
           >
             <header className="preview-header">
-              <h2 id="preview-title">{previewArtifact.filename} preview</h2>
+              <h2 id="preview-title">{previewArtifact.image ? previewArtifact.path || previewArtifact.filename : `${previewArtifact.filename} preview`}</h2>
               <div>
-                <button onClick={() => downloadArtifact(previewArtifact.filename, previewArtifact.content)}>
+                <button onClick={() => (previewArtifact.image ? downloadDataUrl(previewArtifact.filename, previewArtifact.image) : downloadArtifact(previewArtifact.filename, previewArtifact.content))}>
                   <Download size={14} />
                   <span>Download</span>
                 </button>
@@ -3143,13 +3064,17 @@ function App() {
                 </button>
               </div>
             </header>
-            <iframe
-              className="artifact-preview"
-              title={`Preview of ${previewArtifact.filename}`}
-              sandbox="allow-scripts"
-              srcDoc={makePreviewDocument(previewArtifact, previewArtifact.artifacts)}
-            />
-            <p className="preview-note">HTML, CSS, JavaScript, and SVG are rendered in a restricted frame (https images load; scripts cannot reach the network or this app); other files are shown as source. Generated files stay temporary unless you download them.</p>
+            {previewArtifact.image ? (
+              <div className="image-preview"><img src={previewArtifact.image} alt={previewArtifact.filename} /></div>
+            ) : (
+              <iframe
+                className="artifact-preview"
+                title={`Preview of ${previewArtifact.filename}`}
+                sandbox="allow-scripts"
+                srcDoc={makePreviewDocument(previewArtifact, previewArtifact.artifacts)}
+              />
+            )}
+            <p className="preview-note">{previewArtifact.image ? "Picture shown from this device; nothing is uploaded. Large images are shrunk for display." : "HTML, CSS, JavaScript, and SVG are rendered in a restricted frame (https images load; scripts cannot reach the network or this app); other files are shown as source. Generated files stay temporary unless you download them."}</p>
           </section>
         </div>
       )}

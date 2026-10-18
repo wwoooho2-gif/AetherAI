@@ -4,7 +4,7 @@
 import { webSearch, fetchPage, searchImages, generateImage, formatResultsForPrompt } from "./web.js";
 
 export const TOOL_PROMPT =
-  "Tools (use only when needed, put the marker alone on one line, then stop): " +
+  "Tools (use only when needed; one marker per reply, alone on its own line, then stop): " +
   "[[search: query]] web search · [[open: https://url]] read a page · " +
   "[[photo: query]] show real photos · [[image: description]] create a new image. " +
   "Never invent URLs or facts you could look up.";
@@ -15,7 +15,7 @@ export function parseToolCalls(text) {
   const calls = [];
   for (const match of String(text).matchAll(MARKER)) {
     calls.push({ tool: match[1].toLowerCase(), arg: match[2].trim() });
-    if (calls.length >= 3) break;
+    if (calls.length >= 2) break; // one or two lookups per turn keeps replies quick
   }
   return calls;
 }

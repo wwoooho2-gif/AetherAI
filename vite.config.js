@@ -21,7 +21,6 @@ const trainingScript = path.join(projectRoot, "scripts", "train-model.py");
 const trainingSetupScript = path.join(projectRoot, "scripts", "setup-finetuning.sh");
 const trainingEnvironment = path.join(homeDir, ".local", "share", "aether-finetuning-venv", "bin", "python");
 const huggingFaceTokenPath = path.join(homeDir, ".config", "aether", "hf-token");
-const modelStabilityMs = 60_000;
 let ggufJob;
 let ggufReadiness;
 let trainingJob;
@@ -530,47 +529,9 @@ function mediaPlugin() {
   };
 }
 
+// Lists every GGUF in the model folder. Models are only ever deleted when the user removes one
+// (the Remove button); adding a new model never touches the others.
 function listGgufModels() {
-  if (!existsSync(modelDirectory)) return [];
-  const models = readdirSync(modelDirectory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".gguf"))
-    .map((entry) => {
-      const filePath = path.join(modelDirectory, entry.name);
-      const details = statSync(filePath);
-      return {
-        name: entry.name,
-        displayName: entry.name.replace(/\.gguf$/i, ""),
-        size: details.size,
-        modifiedAt: details.mtimeMs,
-      };
-    })
-    .sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name));
-
-  const newestModel = models[0];
-  if (process.env.AETHER_KEEP_ALL_MODELS !== "1" && newestModel && Date.now() - newestModel.modifiedAt >= modelStabilityMs) {
-    for (const oldModel of models.slice(1)) {
-      const oldPath = path.join(modelDirectory, oldModel.name);
-      try {
-        const newestStatus = lstatSync(path.join(modelDirectory, newestModel.name));
-        const fileStatus = lstatSync(oldPath);
-        if (
-          !newestStatus.isFile() ||
-          newestStatus.isSymbolicLink() ||
-          Date.now() - newestStatus.mtimeMs < modelStabilityMs ||
-          !fileStatus.isFile() ||
-          fileStatus.isSymbolicLink() ||
-          fileStatus.mtimeMs > newestStatus.mtimeMs
-        ) {
-          continue;
-        }
-        unlinkSync(oldPath);
-        console.info(`Removed older local model ${oldPath}; keeping ${newestModel.name}.`);
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-    }
-  }
-
   return listGgufModelFiles();
 }
 

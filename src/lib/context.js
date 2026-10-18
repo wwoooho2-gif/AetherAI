@@ -94,21 +94,44 @@ export function packFiles(files, question, budgetChars = 12_000) {
   return out.join("\n\n");
 }
 
+// ---- rolling summaries ("/compact") ------------------------------------------------------------
+// A summary marker is a normal chat entry with kind:"summary". Everything before the newest marker is
+// represented by its text, so the model keeps the facts while the prompt stays small.
+export const isSummary = (message) => message?.kind === "summary";
+export const lastSummaryIndex = (messages) => {
+  for (let i = messages.length - 1; i >= 0; i -= 1) if (isSummary(messages[i])) return i;
+  return -1;
+};
+const askText = (message) => message.compactContent ?? message.requestContent ?? message.content ?? "";
+const SUMMARY_CAP = 2000;
+
+/** The part of a chat the model still sees verbatim-ish: the newest summary (if any) plus what came after it. */
+export function liveMessages(messages) {
+  const at = lastSummaryIndex(messages);
+  return {
+    summary: at >= 0 ? messages[at].content : "",
+    messages: messages.slice(at + 1).filter((m) => (m.role === "user" || m.role === "assistant") && !isSummary(m)),
+  };
+}
+
 /**
  * Build the compact message history.
+ *  - the newest summary (if there is one) replaces everything before it
  *  - the newest turn is kept verbatim
  *  - older assistant turns lose their code blocks and are trimmed
  *  - older user turns lose pasted/attached file bodies (the files stay in the workspace)
  *  - oldest turns drop first when over budget
  */
 export function compactHistory(messages, { budgetTokens = 2200, recentVerbatim = 2 } = {}) {
-  const usable = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  const { summary, messages: usable } = liveMessages(messages);
+  const summaryText = summary ? headTail(summary, SUMMARY_CAP) : "";
+  const summaryCost = summaryText ? estimateTokens(summaryText) + 24 : 0;
   const out = [];
-  let used = 0;
+  let used = summaryCost;
   for (let i = usable.length - 1; i >= 0; i -= 1) {
     const message = usable[i];
     const fromEnd = usable.length - 1 - i;
-    let content = message.compactContent ?? message.requestContent ?? message.content;
+    let content = askText(message);
     if (fromEnd >= recentVerbatim) {
       content = message.role === "assistant" ? headTail(stubCode(content), 900) : headTail(content, 900);
     }
@@ -117,5 +140,94 @@ export function compactHistory(messages, { budgetTokens = 2200, recentVerbatim =
     out.push({ role: message.role, content });
     used += cost;
   }
-  return out.reverse();
+  out.reverse();
+  while (out.length > 1 && out[0].role === "assistant") out.shift(); // chat templates expect a user turn first
+  return summaryText
+    ? [
+        { role: "user", content: `Summary of our earlier conversation (background only, don't repeat it back):\n${summaryText}` },
+        { role: "assistant", content: "Got it." },
+        ...out,
+      ]
+    : out;
+}
+
+/** Tokens the history would use with no budget cut: recent turns whole, older ones trimmed. Drives the meter and auto-compact. */
+export function historyFootprint(messages, recentVerbatim = 2) {
+  const { summary, messages: usable } = liveMessages(messages);
+  let total = summary ? estimateTokens(headTail(summary, SUMMARY_CAP)) + 24 : 0;
+  usable.forEach((message, i) => {
+    let content = askText(message);
+    if (usable.length - 1 - i >= recentVerbatim) content = message.role === "assistant" ? headTail(stubCode(content), 900) : headTail(content, 900);
+    total += estimateTokens(content) + 4;
+  });
+  return total;
+}
+
+/** How full the history share of the prompt is (0..1+). Compaction is due once this passes `threshold`. */
+export function contextFill(messages, historyRoomTokens) {
+  return historyFootprint(messages) / Math.max(1, historyRoomTokens);
+}
+export function compactionDue(messages, historyRoomTokens, { threshold = 0.6, minMessages = 8 } = {}) {
+  return liveMessages(messages).messages.length >= minMessages && contextFill(messages, historyRoomTokens) >= threshold;
+}
+
+/**
+ * Decide what a compaction covers. `keepRecent` newest messages stay as they are (adjusted so they begin on a user turn).
+ * @returns {{ cut: number, older: object[], prior: string } | null} `older` is summarised; the new marker goes at index `cut`.
+ */
+export function planCompaction(messages, keepRecent = 0) {
+  const start = lastSummaryIndex(messages) + 1;
+  let cut = messages.length;
+  if (keepRecent > 0) {
+    cut = messages.length - keepRecent;
+    while (cut > start && messages[cut]?.role !== "user") cut -= 1;
+  }
+  const older = messages.slice(start, cut).filter((m) => (m.role === "user" || m.role === "assistant") && !isSummary(m));
+  if (older.length < 2) return null;
+  return { cut, older, prior: start > 0 ? messages[start - 1].content : "" };
+}
+
+const asTranscript = (messages) =>
+  messages
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${headTail(m.role === "assistant" ? stubCode(askText(m)) : askText(m), 700)}`)
+    .join("\n");
+
+/** Chat messages that ask the model for a short, factual recap. Input is bounded so this stays fast. */
+export function buildCompactRequest(older, prior, focus = "") {
+  const transcript = headTail(asTranscript(older), 9000);
+  return [
+    {
+      role: "system",
+      content: "You compress chat history for another AI. Write a short, factual recap, no greeting and no commentary. Keep: the user's goal, decisions and preferences, key facts, names, file names, numbers, what was done, and what is still open. Drop small talk, code bodies and repetition. Use at most 8 short bullet lines, under 180 words.",
+    },
+    {
+      role: "user",
+      content: [
+        prior ? `Earlier recap:\n${headTail(prior, 1500)}` : "",
+        `New conversation to fold in:\n${transcript}`,
+        focus ? `Pay special attention to: ${focus}` : "",
+        "Write the updated recap now.",
+      ].filter(Boolean).join("\n\n"),
+    },
+  ];
+}
+
+/** No model needed: used when the model is busy, offline, or returns nothing useful. */
+export function fallbackSummary(older, prior = "") {
+  const lines = [];
+  if (prior) lines.push(...prior.split("\n").slice(0, 6));
+  older.forEach((m) => {
+    const text = (m.role === "assistant" ? stubCode(m.content) : askText(m)).replace(/\s+/g, " ").trim();
+    if (!text) return;
+    lines.push(m.role === "user" ? `- User asked: ${headTail(text, 160)}` : `- Aether: ${headTail(text, 140)}`);
+  });
+  return headTail(lines.slice(-14).join("\n"), SUMMARY_CAP);
+}
+
+/** Tidy a model-written recap: strip fences/tool markers and cap its length. */
+export const cleanSummary = (text) =>
+  headTail(String(text || "").replace(/```[\s\S]*?```/g, "").replace(/\[\[[^\]]*\]\]/g, "").replace(/\n{3,}/g, "\n\n").trim(), SUMMARY_CAP);
+
+export function makeSummaryMessage(text, covered, time) {
+  return { role: "assistant", kind: "summary", content: text, summarizes: covered, time, modelName: "Aether" };
 }

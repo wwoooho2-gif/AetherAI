@@ -60,6 +60,7 @@ Turn on the **Web** pill under the chat box to let Aether use the internet for t
 | New images | `/image a fox in the snow` (or the image button). Uses OpenAI if you added a key in the local app, otherwise Pollinations (free; your prompt is sent to that service). |
 | HTML pages | Ask for a page and press **Preview**, or attach an `.html` file and press the eye icon. It runs in a sandboxed frame. |
 | Zip files | `.zip` button on the file chips, on any reply with files, or type `/zip`. |
+| Shrink the chat | `/compact [focus]` or the Context chip summarizes older messages to free up memory. |
 | Read / edit files | Drop files, a folder, or a `.zip` anywhere on the chat. Aether edits with small SEARCH/REPLACE patches, applies them, and lets you download the edited file or the whole project. |
 
 **Hosted site note:** browsers only allow CORS-friendly sites, so web search there covers Wikipedia, Stack Overflow and GitHub. Opening arbitrary links goes through the reader service in `src/lib/web.js` (`window.AETHER_READER_PROXY`; set it to `""` to turn it off). The local app searches and reads any public page itself, blocks private and internal addresses, and sends nothing to a third-party reader.
@@ -91,6 +92,9 @@ Local models are slow mostly because of how much text they read and write. Each 
 - Attached files are re-packed every turn. Big files or projects keep only the parts that match your question.
 - The system prompt is short and identical between requests, with changing material placed last, so llama.cpp can reuse its prompt cache.
 - File edits are patches, so the model writes a few lines instead of the whole file.
+- Replies are short by default (a brevity rule in the system prompt plus an output cap). The **Long** pill lifts both. If a reply hits the cap it says so and you can type "continue".
+- Long chats compact themselves: once the history fills about 60% of its share of the prompt, Aether runs `/compact` for you before the next reply (the model writes the summary, or a quick recap if it is busy). Type `/compact` (optionally `/compact what to remember`) or click the **Context** chip to do it on demand. Your messages are kept: the summary note sits above the recent turns and older messages hide behind **Show earlier messages**.
+- The message list is memoized, long replies and code blocks start collapsed with **Show more**, and only the newest 40 messages are drawn, so typing stays smooth in long chats.
 - The in-browser model is warmed up right after it loads.
 - The app loads lazily: the GGUF editor, voice settings and credits are fetched only when opened, fonts load without blocking the first paint, and saved models restore once the page is idle.
 

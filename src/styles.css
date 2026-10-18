@@ -1047,3 +1047,40 @@ input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
 input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px #8f78d855; }
 input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
 .voice-check { padding: 6px 2px; user-select: none; }
+
+/* ---- compact chat: collapsed long replies, summary notes, context meter ------------------------------- */
+.show-more { display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 0; padding: 3px 9px 3px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+.show-more:hover { border-color: var(--green); color: var(--green); }
+.show-more svg { transition: transform .15s ease; }
+.show-more svg.flip { transform: rotate(180deg); }
+.show-more-code { display: flex; width: 100%; justify-content: center; margin: 0; padding: 7px 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: rgba(127, 127, 127, .06); }
+.show-earlier { display: block; margin: 4px auto 14px; padding: 5px 14px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+.show-earlier:hover { border-color: var(--green); color: var(--green); }
+
+.compact-note { margin: 12px 0; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 11px; }
+.compact-note summary { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; list-style: none; }
+.compact-note summary::-webkit-details-marker { display: none; }
+.compact-note summary span { color: var(--green); font-weight: 600; }
+.compact-note summary em { font-style: normal; opacity: .8; }
+.compact-note[open] summary { border-bottom: 1px dashed var(--line); }
+.compact-note p { margin: 0; padding: 9px 12px 11px; white-space: pre-line; line-height: 1.7; font-size: 11px; }
+
+.ctx-pill { gap: 7px; }
+.ctx-pill:disabled { opacity: .5; cursor: default; }
+.ctx-meter { display: inline-block; width: 26px; height: 4px; overflow: hidden; border-radius: 99px; background: rgba(127, 127, 127, .28); }
+.ctx-meter i { display: block; height: 100%; border-radius: inherit; background: var(--green); transition: width .25s ease; }
+.ctx-high .ctx-meter i { background: #e0a23c; }
+
+/* Attached pictures */
+.attachment-chip .attachment-thumb { width: 40px; height: 40px; padding: 0; overflow: hidden; border-radius: 5px; background: #14151b; }
+.attachment-chip .attachment-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attachment-list { align-items: center; }
+.attachment-chip:has(.attachment-thumb) { padding: 4px 8px 4px 4px; font-size: 11px; }
+.attachment-chip .attachment-thumb { cursor: zoom-in; border: 1px solid #393944; }
+.attachment-dims { color: #8f90a2; font-size: 9px; font-style: normal; white-space: nowrap; }
+.image-preview { display: grid; flex: 1; min-height: 0; place-items: center; padding: 14px; overflow: auto; background: repeating-conic-gradient(#1d1e27 0% 25%, #171821 0% 50%) 50% / 18px 18px; }
+.image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+.message-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.message-image { display: flex; max-width: 220px; flex-direction: column; gap: 4px; padding: 0; border: 1px solid #393944; border-radius: 10px; overflow: hidden; color: #b9b8c8; background: #1b1c24; font-size: 10px; text-align: left; cursor: zoom-in; }
+.message-image img { display: block; width: 100%; max-height: 180px; object-fit: cover; }
+.message-image span { padding: 0 8px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

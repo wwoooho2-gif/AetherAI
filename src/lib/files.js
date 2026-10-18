@@ -7,7 +7,52 @@ export const MAX_BINARY_BYTES = 60_000_000; // per binary file (only a short sum
 export const MAX_TOTAL_FILES = 200; // per drop / per zip
 const SKIP_DIRS = /(^|\/)(node_modules|\.git|dist|build|__pycache__|\.venv|venv|target|\.next|\.idea|\.vscode)(\/|$)/;
 // Media/archives we can't describe usefully. Every other binary (dll, exe, so, class, wasm, pdf, docx…) is summarised.
-const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|bmp|tiff?|heic|mp[34]|m4a|mov|avi|mkv|webm|wav|ogg|flac|woff2?|ttf|otf|eot|gz|tgz|tar|7z|rar|xz|bz2|gguf|pack|idx|rev|lock)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
+const BINARY_EXT = /\.(tiff?|heic|mp[34]|m4a|mov|avi|mkv|webm|wav|ogg|flac|woff2?|ttf|otf|eot|gz|tgz|tar|7z|rar|xz|bz2|gguf|pack|idx|rev|lock)$/i;
+
+
+const IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", ico: "image/x-icon", avif: "image/avif" };
+const MAX_IMAGE_SIDE = 1600; // bigger pictures are shrunk for the on-screen copy so chats stay light
+export const isImageName = (name) => IMAGE_EXT.test(String(name));
+
+const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error || new Error("could not read image"));
+  reader.readAsDataURL(blob);
+});
+
+/** Image bytes -> an attachment with a viewable data URL, its size in pixels, and a short text description for the model. */
+async function describeImage(name, bytes) {
+  const ext = name.split(".").pop().toLowerCase();
+  const mime = IMAGE_MIME[ext] || "image/png";
+  let dataUrl = await blobToDataUrl(new Blob([bytes], { type: mime }));
+  let width = 0;
+  let height = 0;
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("not a picture the browser can show"));
+      el.src = dataUrl;
+    });
+    width = img.naturalWidth;
+    height = img.naturalHeight;
+    if (Math.max(width, height) > MAX_IMAGE_SIDE && ext !== "gif") {
+      const scale = MAX_IMAGE_SIDE / Math.max(width, height);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      dataUrl = canvas.toDataURL(ext === "png" || ext === "webp" ? "image/png" : "image/jpeg", 0.9);
+    }
+  } catch {
+    dataUrl = ""; // keep the file in the list even if this browser cannot draw it
+  }
+  const kb = Math.max(1, Math.round(bytes.length / 1024));
+  const content = `IMAGE ${name}\n${ext.toUpperCase()} picture${width ? `, ${width}x${height} px` : ""}, ${kb} KB.\nThis is a picture the user attached at the path above. A text-only model cannot see its pixels: use the file name, path and what the user says about it, and ask them to describe it if the details matter.`;
+  return { name, content, size: bytes.length, readOnly: true, image: true, mime, dataUrl, width, height };
+}
 
 /** Guess the language from a filename (used for code fences). */
 const LANGS = {
@@ -46,6 +91,11 @@ export async function readAttachments(fileList) {
   const add = async (name, bytes) => {
     if (accepted.length >= MAX_TOTAL_FILES) return rejected.push(`${name} (more than ${MAX_TOTAL_FILES} files)`);
     if (SKIP_DIRS.test(name)) return undefined;
+    if (IMAGE_EXT.test(name)) {
+      if (bytes.length > MAX_BINARY_BYTES) return rejected.push(`${name} (over ${Math.round(MAX_BINARY_BYTES / 1e6)} MB)`);
+      accepted.push(await describeImage(name, bytes));
+      return undefined;
+    }
     if (BINARY_EXT.test(name)) return rejected.push(`${name} (media/archive)`);
     if (!looksLikeText(bytes) || /\.(dll|exe|sys|ocx|so|dylib|class|wasm|bin|o|obj|a|lib|pdf|docx|xlsx|pptx|odt|ods|odp)$/i.test(name)) {
       if (bytes.length > MAX_BINARY_BYTES) return rejected.push(`${name} (over ${Math.round(MAX_BINARY_BYTES / 1e6)} MB)`);
