@@ -14,6 +14,20 @@ import {
 } from "./staticBackend.js";
 import { modelsFor } from "./lib/models.js";
 
+/** Models shipped inside the app (see scripts/fetch-bundled-models.mjs). Empty when none were bundled. */
+function useBundledModels() {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    let live = true;
+    fetch(`${import.meta.env.BASE_URL}models/manifest.json`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => { if (live && Array.isArray(list)) setItems(list); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return items;
+}
+
 const formatSize = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
 
 /**
@@ -27,6 +41,7 @@ export default function ModelLoader({ compact = false, onLoaded }) {
   const [saved, setSaved] = useState([]);
   const [localError, setLocalError] = useState("");
   const inputRef = useRef(null);
+  const bundled = useBundledModels();
   const busy = state.phase === "loading" || state.phase === "downloading";
 
   async function refreshSaved() {
@@ -77,6 +92,20 @@ export default function ModelLoader({ compact = false, onLoaded }) {
         <strong>{state.model ? "Switch model" : "Load a model to start chatting"}</strong>
         <span>Runs in your browser. Your files are never uploaded.</span>
       </header>
+
+      {bundled.length > 0 && !busy && (
+        <div className="model-saved">
+          <span className="model-saved-title"><Download size={12} /> Included with the app</span>
+          {bundled.map((item) => (
+            <div className="model-saved-row" key={item.file}>
+              <button type="button" onClick={() => run(() => loadBrowserModelFromUrl(`${import.meta.env.BASE_URL}models/${item.file}`))}>
+                <span>{item.label}</span>
+                <em>{formatSize(item.bytes)}{state.model?.name === item.file ? " · loaded" : ""}</em>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div
         className={`model-drop ${dragging ? "model-drop-active" : ""} ${busy ? "model-drop-busy" : ""}`}

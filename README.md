@@ -38,6 +38,16 @@ npm start                # start llama.cpp and the app together
 
 Other scripts: `npm run build`, `npm run preview`, `npm run train:setup`, `npm run ai`.
 
+## Install on iPhone (home-screen app)
+
+AetherAI is a Progressive Web App, so it installs like a native app with no App Store or Mac needed.
+
+1. Deploy it (push to `main`; the Pages workflow publishes it) and open <https://wwoooho2-gif.github.io/AetherAI/> in **Safari** on the iPhone.
+2. Tap **Share**, then **Add to Home Screen**, then **Add**.
+3. Open it from the new AetherAI icon. It runs full screen, and the app shell works offline after the first visit.
+
+Notes: iOS limits browser memory, so stick to small models (about 1B or smaller at Q4 on most iPhones). Saved chats and models live in that installed app's own storage, separate from Safari tabs.
+
 ## Run any GGUF in the browser (hosted site)
 
 The hosted version has an integrated loader, so no llama.cpp server is needed.

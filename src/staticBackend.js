@@ -341,8 +341,9 @@ export async function loadBrowserModel(input, options = {}) {
 /** Turn a Hugging Face "blob" page link into the direct download link. */
 export function normalizeModelUrl(raw) {
   let url;
-  try { url = new URL(String(raw).trim()); } catch { throw new Error("Paste a full link that starts with https://"); }
-  if (url.protocol !== "https:") throw new Error("The link must start with https://");
+  try { url = new URL(String(raw).trim(), location.href); } catch { throw new Error("Paste a full link that starts with https://"); }
+  const sameOrigin = url.origin === location.origin; // models bundled with the app
+  if (url.protocol !== "https:" && !sameOrigin) throw new Error("The link must start with https://");
   if (/(^|\.)huggingface\.co$/.test(url.hostname)) url.pathname = url.pathname.replace(/^(\/[^/]+\/[^/]+)\/blob\//, "$1/resolve/");
   if (!/\.gguf$/i.test(url.pathname)) throw new Error("The link must point directly to a .gguf file.");
   return url;

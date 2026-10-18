@@ -13,6 +13,7 @@
     "ai": "sh scripts/start-llama-server.sh",
     "dev": "vite --host 127.0.0.1 --port 5175",
     "dev:game": "vite --host 0.0.0.0 --port 4173",
+    "bundle:models": "node scripts/fetch-bundled-models.mjs",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
   },

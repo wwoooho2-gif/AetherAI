@@ -2627,14 +2627,6 @@ function App() {
           <section className={`conversation ${messages.length === 0 ? "conversation-empty" : ""}`}>
             {messages.length === 0 ? (
               <div className={`welcome ${needsBrowserModel ? "welcome-needs-model" : ""}`}>
-                <div className="group-profile">
-                  <div className="group-avatar"><Sparkles size={23} strokeWidth={1.8} /></div>
-                  <div className="group-profile-copy">
-                    <strong>Aether Intelligence</strong>
-                    <span>AI GROUP <i /> ALWAYS AROUND</span>
-                  </div>
-                  <div className="group-members"><span><Sparkles size={12} /></span><span>YOU + AI</span></div>
-                </div>
                 <div className="welcome-orb"><Sparkles size={25} strokeWidth={1.7} /></div>
                 <div className="eyebrow"><span className="eyebrow-line" /> YOUR AI, IN YOUR CORNER <span className="eyebrow-line" /></div>
                 <h1>Find your next<br />                <em>Favorite idea.</em></h1>
