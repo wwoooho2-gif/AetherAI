@@ -27,3 +27,6 @@ Thumbs.db
 *.sqlite3
 *.vsix
 /public/aether-chat.vsix
+
+# Models fetched at build time (see scripts/fetch-bundled-models.mjs)
+public/models/

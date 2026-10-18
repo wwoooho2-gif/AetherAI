@@ -43,6 +43,7 @@ import ModelLoader from "./ModelLoader.jsx";
 import { downloadDataUrl, downloadArtifact, downloadZip } from "./lib/download.js";
 import { inferFilename } from "./lib/filenames.js";
 import MessageItem, { SummaryNote } from "./MessageItem.jsx";
+import { describeImage } from "./lib/vision.js";
 import { applyPatchBlocks, EDIT_PROMPT, filesFromDrop, parsePatchBlocks, readAttachments } from "./lib/files.js";
 import { buildCompactRequest, cleanSummary, compactHistory, compactionDue, contextFill, estimateTokens, fallbackSummary, headTail, isSummary, lastSummaryIndex, liveMessages, makeSummaryMessage, packFiles, planCompaction } from "./lib/context.js";
 import { extractUrls, generateImage, searchImages, webSearch, formatResultsForPrompt } from "./lib/web.js";
@@ -1732,9 +1733,26 @@ function App() {
       }
     }
 
+    // Pictures: a small on-device vision model describes each one, and the chat model reads that description.
+    // Earlier pictures in the chat are included too (their descriptions are cached, so follow-up questions stay fast).
+    const pictures = history.flatMap((message) => message.images || []).filter((img) => img.dataUrl).slice(-4);
+    const pictureLines = [];
+    for (const [index, picture] of pictures.entries()) {
+      try {
+        const description = await describeImage(picture.dataUrl, { onStatus: setToolStatus });
+        if (description) pictureLines.push(`Image ${index + 1} (${picture.name}): ${description}`);
+      } catch (error) {
+        console.warn("Image understanding failed:", error);
+        notes.push(`Couldn’t look at ${picture.name}: ${error.message || "the vision model didn’t load"}. It needs an internet connection the first time.`);
+      }
+    }
+    const imageBlock = pictureLines.length
+      ? `The user attached picture(s). You can't see them directly; a vision model described them for you (treat the descriptions as what you see, and answer as if you looked at the picture):\n${pictureLines.join("\n")}`
+      : "";
+
     // Split what is left of the budget: web text, then attached files, then older chat turns.
     const plan = contextPlan(provider);
-    let room = plan.promptBudget - estimateTokens(system.content) - estimateTokens(question) - 40;
+    let room = plan.promptBudget - estimateTokens(system.content) - estimateTokens(question) - estimateTokens(imageBlock) - 40;
     const webBlock = headTail(extras.join("\n\n"), Math.max(0, Math.floor(room * 0.3 * 4)));
     room -= estimateTokens(webBlock);
     const fileBlock = packFiles(files, question, Math.max(0, Math.floor(room * (history.length > 1 ? 0.55 : 0.8) * 4)));
@@ -1744,7 +1762,7 @@ function App() {
     // (llama.cpp can then reuse its prompt cache instead of re-reading everything).
     const finalUser = {
       role: "user",
-      content: [question || "Review the attached files.", fileBlock, webBlock].filter(Boolean).join("\n\n"),
+      content: [question || "Review the attached files.", imageBlock, fileBlock, webBlock].filter(Boolean).join("\n\n"),
     };
     let requestMessages = [system, ...prior, finalUser];
 

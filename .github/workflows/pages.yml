@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: 20
       - run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - run: npm run bundle:models
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
         with:
