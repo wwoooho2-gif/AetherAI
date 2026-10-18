@@ -1419,17 +1419,43 @@ async function requestTts({ url, apiKey, body }) {
   const payload = JSON.stringify(body);
   if (payload.length > 20_000) throw Object.assign(new Error("That text is too long for one voice request."), { status: 413 });
   const target = await validateCustomProviderUrl(url);
-  const upstream = await fetch(target, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "audio/*,application/json",
-      ...(apiKey.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {}),
-    },
-    body: payload,
-    redirect: "error",
-    signal: AbortSignal.timeout(60_000),
-  });
+  let upstream;
+  let current = target;
+  try {
+    // Follow a few redirects by hand so every hop is re-checked (public https hosts only) and the key
+    // is never sent to a different host than the one the visitor configured.
+    for (let hop = 0; ; hop += 1) {
+      upstream = await fetch(current, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "audio/*,application/json",
+          ...(apiKey.trim() && current.hostname === target.hostname ? { Authorization: `Bearer ${apiKey.trim()}` } : {}),
+        },
+        body: payload,
+        redirect: "manual",
+        signal: AbortSignal.timeout(60_000),
+      });
+      const location = upstream.status >= 300 && upstream.status < 400 ? upstream.headers.get("location") : "";
+      if (!location) break;
+      if (hop >= 3) throw Object.assign(new Error(`${target.hostname} redirected too many times.`), { status: 502 });
+      const next = new URL(location, current).href;
+      try {
+        current = await validateCustomProviderUrl(next);
+      } catch {
+        throw Object.assign(new Error(`${target.hostname} redirected to ${next.slice(0, 120)}, which can't be used. The service has probably moved or shut down.`), { status: 502 });
+      }
+    }
+  } catch (error) {
+    if (error?.status) throw error;
+    // Node reports every connection problem as just "fetch failed"; the real reason is in error.cause.
+    const code = error?.cause?.code || error?.cause?.message || error?.name || "";
+    const hint = /ENOTFOUND|EAI_AGAIN/.test(code) ? " (DNS lookup failed: the host may no longer exist or your DNS is blocking it)"
+      : /ECONNREFUSED|ECONNRESET/.test(code) ? " (the connection was refused or reset)"
+      : /TIMEOUT|Timeout/.test(code) ? " (timed out)"
+      : /CERT|TLS|SSL/.test(code) ? " (TLS/certificate problem)" : "";
+    throw Object.assign(new Error(`Could not reach ${current.hostname}: ${code || error?.message || "network error"}${hint}`), { status: 502 });
+  }
   const type = upstream.headers.get("content-type") || "application/octet-stream";
   if (!upstream.ok) {
     const detail = (await upstream.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);

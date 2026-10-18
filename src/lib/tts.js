@@ -16,6 +16,27 @@ export const HOPPOU_PRESET = {
 };
 export const isHoppou = (settings) => settings.engine === "http" && settings.http.url === HOPPOU_PRESET.url;
 
+// TikTok voices through a community proxy (Weilbyte/tiktok-tts). Unofficial: it needs no key, but it can be
+// rate-limited or go offline at any time, and the browser must be allowed to call it (CORS).
+export const TIKTOK_PRESET = {
+  url: "https://tiktok-tts.weilnet.workers.dev/api/generation",
+  model: "",
+  voice: "en_us_001",
+  bodyTemplate: '{"text":"{{text}}","voice":"{{voice}}"}',
+};
+// Same API shape on a second community host (used automatically if the first one fails).
+export const TIKTOK_BACKUP_URL = "https://tiktoktts.com/api/tiktok-tts";
+export const isTiktok = (settings) => settings.engine === "http" && settings.http.url === TIKTOK_PRESET.url;
+export const TIKTOK_VOICES = [
+  ["en_male_narration", "Narrator"],
+  ["en_us_ghostface", "Ghost Face"],
+  ["en_us_chewbacca", "Chewbacca"],
+  ["en_us_c3po", "C3PO"],
+  ["en_us_stitch", "Stitch"],
+  ["en_us_stormtrooper", "Stormtrooper"],
+  ["en_us_rocket", "Rocket"],
+];
+
 export const DEFAULT_TTS_SETTINGS = {
   engine: "browser", // "browser" | "http"
   autoRead: false,
@@ -137,7 +158,21 @@ function base64ToBlob(base64, type = "audio/mpeg") {
 }
 
 /** Ask the configured service for audio. Returns { blob } or { url }. */
-export async function requestSpeechAudio(http, apiKey, text, { rate = 1, isStatic = false, signal } = {}) {
+export async function requestSpeechAudio(http, apiKey, text, options = {}) {
+  try {
+    return await requestSpeechAudioOnce(http, apiKey, text, options);
+  } catch (error) {
+    if (error?.name === "AbortError" || http.url !== TIKTOK_PRESET.url) throw error;
+    try {
+      return await requestSpeechAudioOnce({ ...http, url: TIKTOK_BACKUP_URL }, apiKey, text, options);
+    } catch (backupError) {
+      if (backupError?.name === "AbortError") throw backupError;
+      throw new Error(`Both TikTok voice hosts failed. ${error.message} | ${backupError.message}`.slice(0, 600));
+    }
+  }
+}
+
+async function requestSpeechAudioOnce(http, apiKey, text, { rate = 1, isStatic = false, signal } = {}) {
   if (!/^https?:\/\//i.test(http.url || "")) throw new Error("Enter the voice service URL in Voice settings.");
   const body = buildTtsBody(http.bodyTemplate || DEFAULT_BODY_TEMPLATE, {
     text, voice: http.voice || "", model: http.model || "", speed: rate,
@@ -177,9 +212,10 @@ export async function requestSpeechAudio(http, apiKey, text, { rate = 1, isStati
   if (/^audio\//i.test(type) || type.includes("octet-stream")) return { blob: await response.blob() };
   if (type.includes("json")) {
     const data = await response.json();
+    if (data.success === false) throw new Error(String(data.error || "The voice service reported an error.").slice(0, 300));
     const link = data.audio_url || data.url;
     if (typeof link === "string" && /^https:\/\//.test(link)) return { url: link };
-    const encoded = data.audio_base64 || data.audio;
+    const encoded = data.audio_base64 || data.audio || data.data; // "data" is what the TikTok proxy uses
     if (typeof encoded === "string" && encoded.length > 100) return { blob: base64ToBlob(encoded) };
   }
   throw new Error("The voice service didn’t return audio. Check the request template in Voice settings.");
@@ -234,12 +270,23 @@ export function createSpeaker({ getSettings, getApiKey, isStatic, onChange }) {
     });
   }
 
-  async function speakHttp(chunks, id, token, settings) {
+  async function speakHttp(chunks, id, token, settings, progress = { done: 0 }) {
     const rate = settings.rate;
     abort = new AbortController();
     const { signal } = abort;
+    const request = async (chunk) => {
+      try {
+        return await requestSpeechAudio(settings.http, getApiKey?.() || "", chunk, { rate, isStatic, signal });
+      } catch (error) {
+        // One quick retry for a flaky gateway (502/503/504); anything else fails straight away.
+        if (error?.name === "AbortError" || !/HTTP 50[234]\b/.test(error?.message || "")) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        if (signal.aborted) throw error;
+        return requestSpeechAudio(settings.http, getApiKey?.() || "", chunk, { rate, isStatic, signal });
+      }
+    };
     const fetchChunk = (chunk) => {
-      const promise = requestSpeechAudio(settings.http, getApiKey?.() || "", chunk, { rate, isStatic, signal });
+      const promise = request(chunk);
       promise.catch(() => {}); // avoid unhandled-rejection noise for prefetches that get cancelled
       return promise;
     };
@@ -252,13 +299,14 @@ export function createSpeaker({ getSettings, getApiKey, isStatic, onChange }) {
       report("speaking", id);
       await playSource(source, rate, token);
       if (token !== run) return;
+      progress.done = i + 1;
       if (i + 1 < chunks.length) report("loading", id);
     }
     releaseAudio();
     report("idle");
   }
 
-  function speakBrowser(chunks, id, token, settings) {
+  function speakBrowser(chunks, id, token, settings, why = "") {
     const engine = synth();
     if (!engine || typeof SpeechSynthesisUtterance === "undefined") {
       throw new Error("This browser has no built-in text-to-speech.");
@@ -281,7 +329,7 @@ export function createSpeaker({ getSettings, getApiKey, isStatic, onChange }) {
         if (token !== run || event.error === "interrupted" || event.error === "canceled") return;
         run += 1;
         engine.cancel();
-        report("idle", null, `The browser voice failed (${event.error || "unknown error"}).`);
+        report("idle", null, `${why ? `The online voice failed: ${why} ` : ""}The browser voice failed too (${event.error || "unknown error"}). This device may have no speech voices installed.`);
       };
       engine.speak(utterance);
     });
@@ -290,14 +338,23 @@ export function createSpeaker({ getSettings, getApiKey, isStatic, onChange }) {
   async function speak(id, markdown) {
     stop();
     const settings = getSettings();
-    const chunks = chunkText(speakableText(markdown), settings.engine === "http" ? 300 : 220);
+    const chunks = chunkText(speakableText(markdown), settings.engine === "http" ? (isTiktok(settings) ? 250 : 300) : 220); // TikTok caps each request at 300 characters
     if (!chunks.length) return;
     const token = run;
+    const progress = { done: 0 };
     try {
-      if (settings.engine === "http") await speakHttp(chunks, id, token, settings);
+      if (settings.engine === "http") await speakHttp(chunks, id, token, settings, progress);
       else speakBrowser(chunks, id, token, settings);
     } catch (error) {
       if (error?.name === "AbortError" || token !== run) return;
+      // The online voice failed (down, blocked, bad key): keep reading with the device's own voice instead.
+      if (settings.engine === "http" && synth() && typeof SpeechSynthesisUtterance !== "undefined") {
+        try {
+          releaseAudio();
+          speakBrowser(chunks.slice(progress.done), id, token, settings, error.message || "unknown error");
+          return;
+        } catch { /* fall through to the error report below */ }
+      }
       run += 1;
       releaseAudio();
       report("idle", null, error.message || "Could not read this aloud.");

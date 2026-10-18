@@ -237,6 +237,20 @@ export async function deleteSavedModel(name) {
 }
 
 // -- loading ---------------------------------------------------------------------------------
+// The runtime (JavaScript chunk + WebAssembly binary) is the same for every model, so fetch it ahead of
+// time, in parallel with whatever else the visitor is doing (picking a file, reading saved weights).
+// Safe to call any number of times; it only warms the cache and never starts the model.
+let runtimePreload = null;
+export function preloadRuntime() {
+  if (!runtimePreload) {
+    runtimePreload = Promise.all([
+      import("@wllama/wllama"),
+      fetch(wasmUrl).then((response) => response.arrayBuffer()),
+    ]).catch(() => { runtimePreload = null; }); // best effort: a real load will retry and report errors
+  }
+  return runtimePreload;
+}
+
 async function startRuntime(blobs, name, size, onProgress) {
   const { Wllama } = await import("@wllama/wllama");
   await unloadBrowserModel();
@@ -294,6 +308,7 @@ export async function loadBrowserModel(input, options = {}) {
   }
   try {
     setLoaderState({ phase: "loading", percent: 0, error: "", message: `Loading ${primary} into the browser…` });
+    preloadRuntime();
     await assertGguf(files[0]);
     await startRuntime(files, primary, size, (percent) =>
       setLoaderState({ phase: "loading", percent, message: `Loading ${primary} into the browser…` }),
@@ -432,6 +447,7 @@ export async function restoreLastModel() {
     }
     localStorage.setItem(RESTORING_KEY, "1");
   } catch { /* storage blocked */ }
+  preloadRuntime(); // download the runtime while the saved weights are read from disk
   const files = await readSavedFiles(last).catch(() => null);
   if (!files) { rememberLastModel(""); try { localStorage.removeItem(RESTORING_KEY); } catch { /* */ } return null; }
   try {

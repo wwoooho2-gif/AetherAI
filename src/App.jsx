@@ -38,7 +38,7 @@ import {
 } from "lucide-react";
 
 import { HOSTED_MAX_MB, matchModelRequest, modelListText } from "./lib/models.js";
-import { IS_STATIC, IS_MOBILE, BROWSER_CONTEXT, installStaticBackend, loadBrowserModel, loadBrowserModelFromUrl, getLoaderState, subscribeLoader, restoreLastModel } from "./staticBackend.js";
+import { IS_STATIC, IS_MOBILE, BROWSER_CONTEXT, installStaticBackend, loadBrowserModel, loadBrowserModelFromUrl, getLoaderState, subscribeLoader, restoreLastModel, preloadRuntime } from "./staticBackend.js";
 import ModelLoader from "./ModelLoader.jsx";
 import { downloadDataUrl, downloadArtifact, downloadZip } from "./lib/download.js";
 import { inferFilename } from "./lib/filenames.js";
@@ -1074,7 +1074,8 @@ function App() {
     if (!IS_STATIC) return undefined;
     const idle = window.requestIdleCallback || ((callback) => window.setTimeout(callback, 200));
     const cancel = window.cancelIdleCallback || window.clearTimeout;
-    const handle = idle(() => restoreLastModel(), { timeout: 1500 });
+    // Restoring a saved model warms the runtime itself; otherwise fetch it now so picking a file starts instantly.
+    const handle = idle(() => { restoreLastModel().then((restored) => { if (!restored) preloadRuntime(); }); }, { timeout: 1500 });
     return () => cancel(handle);
   }, []);
 

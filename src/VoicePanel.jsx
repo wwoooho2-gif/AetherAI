@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Square, Volume2, X } from "lucide-react";
 import CustomSelect from "./CustomSelect.jsx";
-import { DEFAULT_BODY_TEMPLATE, HOPPOU_PRESET, isHoppou } from "./lib/tts.js";
+import { DEFAULT_BODY_TEMPLATE, HOPPOU_PRESET, TIKTOK_PRESET, TIKTOK_VOICES, isHoppou, isTiktok } from "./lib/tts.js";
 
 // Read-aloud settings. Everything except the API key is saved in this browser; the key lives in memory only.
 export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, speech, onTest, onStop, onClose, isStatic }) {
@@ -18,6 +18,7 @@ export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, spe
   const set = (patch) => onSettings({ ...settings, ...patch });
   const setHttp = (patch) => onSettings({ ...settings, http: { ...settings.http, ...patch } });
   const hoppou = isHoppou(settings);
+  const tiktok = isTiktok(settings);
   const busy = speech.state !== "idle";
   const hasBrowserVoice = typeof window !== "undefined" && "speechSynthesis" in window;
 
@@ -44,16 +45,18 @@ export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, spe
         <CustomSelect
           id="voice-engine"
           ariaLabel="Voice engine"
-          value={settings.engine === "browser" ? "browser" : hoppou ? "hoppou" : "http"}
+          value={settings.engine === "browser" ? "browser" : hoppou ? "hoppou" : tiktok ? "tiktok" : "http"}
           options={[
             { value: "browser", label: "Built-in (this device)" },
             { value: "hoppou", label: "hoppou.ai" },
+            { value: "tiktok", label: "TikTok voices (unofficial)" },
             { value: "http", label: "Other service (any TTS API)" },
           ]}
           onChange={(choice) => {
             if (choice === "browser") set({ engine: "browser" });
             else if (choice === "hoppou") onSettings({ ...settings, engine: "http", http: { ...HOPPOU_PRESET } });
-            else set({ engine: "http", http: hoppou ? { ...settings.http, url: "" } : settings.http });
+            else if (choice === "tiktok") onSettings({ ...settings, engine: "http", http: { ...TIKTOK_PRESET } });
+            else set({ engine: "http", http: hoppou || tiktok ? { ...settings.http, url: "" } : settings.http });
           }}
         />
       </div>
@@ -78,6 +81,22 @@ export default function VoicePanel({ settings, onSettings, apiKey, onApiKey, spe
             <span>Pitch {settings.pitch.toFixed(1)}</span>
             <input type="range" min="0.5" max="1.5" step="0.1" value={settings.pitch} onChange={(event) => set({ pitch: Number(event.target.value) })} />
           </div>
+        </>
+      ) : tiktok ? (
+        <>
+          <div className="voice-row">
+            <span>Voice</span>
+            <CustomSelect
+              id="voice-tiktok"
+              ariaLabel="TikTok voice"
+              value={settings.http.voice || TIKTOK_PRESET.voice}
+              options={TIKTOK_VOICES.map(([value, label]) => ({ value, label }))}
+              onChange={(voice) => setHttp({ voice })}
+            />
+          </div>
+          <p className="voice-hint">
+            No key needed. This uses a community proxy for TikTok’s voices, which isn’t official: it can be rate-limited or go offline, and your reply text is sent to it. If it fails, the built-in voice reads instead.
+          </p>
         </>
       ) : hoppou ? (
         <>
